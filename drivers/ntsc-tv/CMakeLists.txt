@@ -30,8 +30,6 @@ target_link_libraries(ntsc-tv-driver INTERFACE
         hardware_irq
         hardware_pwm
         hardware_sync
-        hardware_clocks
-        hardware_vreg
 )
 
 target_include_directories(ntsc-tv-driver INTERFACE

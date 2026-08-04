@@ -2,6 +2,12 @@ add_library(graphics INTERFACE)
 
 target_sources(graphics INTERFACE ${CMAKE_CURRENT_LIST_DIR}/graphics.c)
 
+target_link_libraries(graphics INTERFACE
+        hardware_clocks
+        hardware_vreg
+        pico_time
+)
+
 #target_link_libraries(graphics INTERFACE
 #vga-nextgen
 #hdmi

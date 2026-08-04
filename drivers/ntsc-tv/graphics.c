@@ -4,9 +4,7 @@
 
 #include <stddef.h>
 
-#include <hardware/clocks.h>
 #include <hardware/dma.h>
-#include <hardware/vreg.h>
 
 #include "ntsc-tv.h"
 
@@ -14,19 +12,12 @@
 #include <vga.h>
 #endif
 
-enum {
-    NTSC_TV_SYSTEM_CLOCK_KHZ = 315000
-};
-
 static uint8_t graphics_framebuffer[GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT]
         __attribute__((aligned(4)));
 
 uint8_t *text_buffer = NULL;
 
-void graphics_init(void) {
-    vreg_set_voltage(VREG_VOLTAGE_1_30);
-    set_sys_clock_khz(NTSC_TV_SYSTEM_CLOCK_KHZ, true);
-
+void ntsc_tv_graphics_init(void) {
     uint32_t start_mask = 0;
 
 #if defined(VGA)

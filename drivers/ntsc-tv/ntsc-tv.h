@@ -35,6 +35,7 @@ extern "C" {
 #endif
 
 void ntsc_tv_init(const uint8_t *framebuffer);
+void ntsc_tv_graphics_init(void);
 uint32_t ntsc_tv_start_mask(void);
 void ntsc_tv_set_framebuffer(const uint8_t *framebuffer);
 void ntsc_tv_request_framebuffer(const uint8_t *framebuffer);

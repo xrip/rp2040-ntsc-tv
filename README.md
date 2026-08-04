@@ -1,7 +1,8 @@
-# RP2040/RP2350 VGA and NTSC video output
+# RP2040/RP2350 VGA, NTSC, HDMI, and TFT video output
 
-This project gives color NTSC composite and VGA output from one Raspberry Pi
-Pico framebuffer. It builds for both RP2040/Cortex-M0+ and
+This project gives VGA, color NTSC composite, HDMI, or TFT output from one
+Raspberry Pi Pico framebuffer. VGA and NTSC can run together. HDMI and TFT are
+single-output forms. The project builds for both RP2040/Cortex-M0+ and
 RP2350/Cortex-M33.
 
 The current dual-output path is made for one exact source format:
@@ -23,7 +24,7 @@ The demo has three old-school scenes: a jumping ball, a rotating torus, and a
 3D helix. They are drawn over a wavy black-and-white perspective checkerboard.
 The objects use six color ramps and crossfades.
 
-## System map
+## Dual VGA and NTSC system map
 
 ```text
                          core 1
@@ -78,14 +79,14 @@ changed.
 
 ### `drivers/graphics`
 
-This folder has the common public `graphics.h` interface, fonts, and text/window
-drawing helpers. The selected output module supplies the `graphics_*` display
-functions.
+This folder has the common public `graphics.h` interface, fonts, text/window
+drawing helpers, and the one public `graphics_init()` function. The selected
+output module supplies the other `graphics_*` display functions.
 
-The same public calls are used for VGA, NTSC, and dual output:
+The same public calls are used for VGA, NTSC, dual output, HDMI, and TFT:
 
-- `graphics_init()` starts every selected output; when NTSC is present it also
-  sets the voltage and the 315 MHz system clock;
+- `graphics_init()` sets any clock required by the selected form, then starts
+  the selected output or outputs;
 - `graphics_set_palette()` makes the selected output palette entries from one
   RGB888 color;
 - `graphics_get_framebuffer()` returns the built-in 320 x 240 primary buffer;
@@ -95,7 +96,7 @@ The same public calls are used for VGA, NTSC, and dual output:
   but only when width is 320 and height is 240.
 
 Some API calls are present for source compatibility with the older graphics
-code, but they have no effect in the three fixed 320 x 240 output forms:
+code, but they have no effect in the fixed 320 x 240 output forms:
 
 - `graphics_set_mode()`;
 - `graphics_set_offset()`;
@@ -128,19 +129,38 @@ This is a portable NTSC module with the CMake target `ntsc-tv-driver`.
   output.
 
 Linking this target adds `NTSC_TV=1` to the final program. If `VGA=1` is also
-present, this module's graphics adapter starts both drivers and sends every
-graphics API action to both. The VGA-only adapter compiles to an empty unit in
-that form, so there is one and only one public graphics implementation.
+present, this module's graphics adapter sends every graphics API action to both
+drivers. The VGA-only adapter compiles to an empty unit in that form.
+
+### `drivers/hdmi`
+
+This is the fixed 320 x 240 indexed HDMI module. It uses one PIO state machine
+for TMDS output, one PIO state machine for palette-address conversion, four DMA
+channels, and an exclusive DMA IRQ. The default HDMI base pin is GPIO6. HDMI
+uses a 378 MHz system clock and is not combined with VGA or NTSC.
+
+Four TMDS control symbols use palette slots 252 through 255. Logical colors in
+those four slots are remapped to slots 48 through 51, so the HDMI form has 252
+independent palette colors.
+
+### `drivers/st7789`
+
+This is the fixed 320 x 240 indexed TFT module for the ST7789-compatible PIO
+interface. It converts each palette entry to RGB565 and sends a complete frame
+when `graphics_present_framebuffer()` is called. TFT does not change the system
+clock.
 
 ## Clock tree
 
-The NTSC-only and dual paths change the chip-wide system clock:
+The selected form owns any required chip-wide clock change:
 
 ```text
-clk_sys = 315 MHz
+NTSC or dual : clk_sys = 315 MHz
+HDMI         : clk_sys = 378 MHz
+VGA or TFT   : no clock change
 ```
 
-It also asks for a 1.30 V core voltage before making that clock change.
+NTSC and HDMI ask for a higher core voltage before making their clock change.
 
 In dual output this clock is used by both outputs. VGA-only does not change the
 system clock or core voltage; its PIO divider is made from the clock set by the
@@ -521,25 +541,30 @@ current code limit if the NTSC vertical layout is changed.
 
 ## Build system
 
-The project uses CMake 3.21 or newer, Pico SDK, and C23. Two independent CMake
-options select the output modules:
+The project uses CMake 3.21 or newer, Pico SDK, and C23. Four CMake options
+select the output modules:
 
 | CMake option | Default | Effect |
 |---|---:|---|
 | `VGA` | `ON` | link `vga-nextgen` and set `VGA=1` |
 | `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
+| `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
+| `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
 | `NTSC_USE_SCRATCH_Y` | `OFF` | put NTSC palette tables in scratch Y |
 
-This gives the three supported forms:
+This gives five supported forms:
 
 | Form | CMake values | Driver targets |
 |---|---|---|
 | VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga-nextgen` |
 | NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-tv-driver` |
 | Dual | `VGA=ON`, `NTSC_TV=ON` | all three targets |
+| HDMI | `HDMI=ON`, all other outputs off | `graphics`, `hdmi` |
+| TFT | `TFT=ON`, all other outputs off | `graphics`, `st7789` |
 
-CMake stops with an error if both outputs are off.
+CMake stops with an error if every output is off, if HDMI or TFT is combined
+with VGA or NTSC, or if HDMI and TFT are both selected.
 
 ### Use in another project
 
@@ -580,7 +605,7 @@ the same public `graphics_*` names. NTSC-only use needs only the new
 
 ### CLion and command-line presets
 
-Two configure presets are present:
+Six configure presets are present. The default two build dual VGA and NTSC:
 
 ```powershell
 cmake --preset rp2040
@@ -598,6 +623,10 @@ The presets select:
 |---|---|---|---|
 | `rp2040` | `pico` | `rp2040` | Cortex-M0+ |
 | `rp2350` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
+| `rp2040-hdmi` | `pico` | `rp2040` | Cortex-M0+ |
+| `rp2350-hdmi` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
+| `rp2040-tft` | `pico` | `rp2040` | Cortex-M0+ |
+| `rp2350-tft` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 
 Both use `MinSizeRel`, Ninja, UF2 output, VGA plus NTSC, normal NTSC palette
 RAM, and no scratch placement. The RP2350 preset also sets
@@ -616,7 +645,8 @@ bin/rp2040/MinSizeRel/
 bin/rp2350-arm-s/MinSizeRel/
 ```
 
-The file to copy to a board is `ntsc-tv.uf2` in the matching directory.
+The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or
+`ntsc-tv-tft.uf2` in the matching directory.
 
 ## Hardware
 
@@ -641,13 +671,23 @@ The default VGA bus is GPIO6 through GPIO13. A suitable RGB resistor network,
 sync connection, ground connection, and VGA connector are required. Their
 electrical schematic is not part of this repository.
 
+### HDMI
+
+The default clock differential pair starts at GPIO6 and the three data pairs
+start at GPIO8. The module uses GPIO6 through GPIO13.
+
+### TFT
+
+The default pins are GPIO6 for CS, GPIO8 for reset, GPIO9 for the backlight,
+GPIO10 for D/C, GPIO12 for data, and GPIO13 for clock.
+
 ## Start flow
 
 The current `main()` order is:
 
 1. make all demo palettes and lookup tables;
 2. call `graphics_init()` on core 0;
-3. start VGA and NTSC DMA scanout;
+3. start the selected display hardware;
 4. make a short LED start pattern;
 5. start `core1_entry()`;
 6. draw and present frames on core 1 forever;

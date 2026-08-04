@@ -25,6 +25,7 @@ extern "C" {
 #endif
 
 void vga_init(const uint8_t *framebuffer);
+void vga_graphics_init(void);
 uint32_t vga_start_mask(void);
 void vga_enable(void);
 void vga_set_framebuffer(const uint8_t *framebuffer);

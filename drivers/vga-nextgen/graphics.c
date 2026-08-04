@@ -14,7 +14,7 @@ static uint8_t graphics_framebuffer[GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT
 
 uint8_t *text_buffer = NULL;
 
-void graphics_init(void) {
+void vga_graphics_init(void) {
     vga_init(graphics_framebuffer);
     dma_start_channel_mask(vga_start_mask());
     vga_enable();

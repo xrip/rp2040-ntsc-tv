@@ -20,6 +20,8 @@
         "PICO_NO_UF2": "OFF",
         "VGA": "ON",
         "NTSC_TV": "ON",
+        "HDMI": "OFF",
+        "TFT": "OFF",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
       }
@@ -39,8 +41,54 @@
         "PICO_NO_COPRO_DIS": "ON",
         "VGA": "ON",
         "NTSC_TV": "ON",
+        "HDMI": "OFF",
+        "TFT": "OFF",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
+      }
+    },
+    {
+      "name": "rp2040-hdmi",
+      "displayName": "RP2040 / HDMI",
+      "inherits": "rp2040",
+      "binaryDir": "${sourceDir}/cmake-build-rp2040-hdmi",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "OFF",
+        "HDMI": "ON"
+      }
+    },
+    {
+      "name": "rp2350-hdmi",
+      "displayName": "RP2350 / HDMI",
+      "inherits": "rp2350",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-hdmi",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "OFF",
+        "HDMI": "ON"
+      }
+    },
+    {
+      "name": "rp2040-tft",
+      "displayName": "RP2040 / TFT",
+      "inherits": "rp2040",
+      "binaryDir": "${sourceDir}/cmake-build-rp2040-tft",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "OFF",
+        "TFT": "ON"
+      }
+    },
+    {
+      "name": "rp2350-tft",
+      "displayName": "RP2350 / TFT",
+      "inherits": "rp2350",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-tft",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "OFF",
+        "TFT": "ON"
       }
     }
   ]
