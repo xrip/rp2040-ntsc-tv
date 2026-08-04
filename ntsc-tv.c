@@ -11,7 +11,9 @@
 enum {
     DEMO_HORIZON = 68,
     DEMO_FRAME_TIME_MS = 33,
-    DEMO_TRAVEL_FRAMES = 120,
+    DEMO_X_TRAVEL_FRAMES = 157,
+    DEMO_DEPTH_TRAVEL_FRAMES = 211,
+    DEMO_BOUNCE_FRAMES = 44,
     DEMO_JUMP_HEIGHT = 42,
 
     DEMO_SKY_BASE = 0,
@@ -19,6 +21,8 @@ enum {
     DEMO_FLOOR_DARK_BASE = 16,
     DEMO_FLOOR_LIGHT_BASE = 32,
     DEMO_FLOOR_SHADES = 16,
+    DEMO_WAVE_COORD_SHIFT = 10,
+    DEMO_WAVE_SCALE = 96,
     DEMO_BALL_BASE = 64,
     DEMO_BALL_SHADES = 32,
     DEMO_BALL_COLOR_COUNT = 6,
@@ -56,6 +60,7 @@ static uint8_t demo_shadow_half_width[DEMO_BALL_SIZE_COUNT]
 static uint32_t demo_floor_x_step[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
 static uint32_t demo_floor_z[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
 static uint8_t demo_floor_shade[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
+static int8_t demo_wave_lut[256];
 
 static inline void demo_set_rgb(const uint8_t index,
                                 const uint8_t red,
@@ -110,6 +115,15 @@ static void demo_init_floor(void) {
                 (uint8_t)(screen_depth * (DEMO_FLOOR_SHADES - 1) / floor_height);
     }
 
+}
+
+static void demo_init_wave(void) {
+    const float two_pi = 6.283185307179586f;
+
+    for (int phase = 0; phase < 256; ++phase) {
+        demo_wave_lut[phase] =
+                (int8_t)lrintf(127.0f * sinf(two_pi * (float)phase / 256.0f));
+    }
 }
 
 static void demo_init_ball(void) {
@@ -174,32 +188,51 @@ static void demo_draw_background(uint8_t *framebuffer, const uint32_t frame) {
         const uint32_t x_step = demo_floor_x_step[floor_index];
         uint32_t world_x = (128u << 16) - (NTSC_FRAME_WIDTH / 2u) * x_step;
         const uint32_t world_z = demo_floor_z[floor_index] + floor_scroll;
-        const uint32_t z_tile = world_z >> 16;
+        const uint8_t wave_time = (uint8_t)(frame * 2u);
+        const int32_t row_wave_x =
+                demo_wave_lut[(uint8_t)((world_z >> DEMO_WAVE_COORD_SHIFT) + wave_time)] *
+                DEMO_WAVE_SCALE;
         const uint8_t shade = demo_floor_shade[floor_index];
         const uint8_t dark = (uint8_t)(DEMO_FLOOR_DARK_BASE + shade);
         const uint8_t light = (uint8_t)(DEMO_FLOOR_LIGHT_BASE + shade);
         uint8_t *row = &framebuffer[y * NTSC_FRAME_WIDTH];
 
         for (int x = 0; x < NTSC_FRAME_WIDTH; ++x) {
-            const uint32_t x_tile = world_x >> 16;
+            const int32_t column_wave_z =
+                    demo_wave_lut[(uint8_t)((world_x >> DEMO_WAVE_COORD_SHIFT) -
+                                            wave_time)] * DEMO_WAVE_SCALE;
+            const uint32_t x_tile = (world_x + row_wave_x) >> 16;
+            const uint32_t z_tile = (world_z + column_wave_z) >> 16;
             row[x] = ((x_tile ^ z_tile) & 1u) ? light : dark;
             world_x += x_step;
         }
     }
 }
 
+static uint32_t demo_triangle_phase(const uint32_t frame,
+                                    const uint32_t travel_frames) {
+    const uint32_t period = travel_frames * 2u;
+    uint32_t phase = frame % period;
+    if (phase > travel_frames) {
+        phase = period - phase;
+    }
+    return phase;
+}
+
 static void demo_ball_position(const uint32_t frame,
                                int *center_x,
                                int *center_y,
                                int *ground_y,
-                               int *size_index) {
-    const uint32_t period = DEMO_TRAVEL_FRAMES * 2u;
-    uint32_t phase = frame % period;
-    if (phase > DEMO_TRAVEL_FRAMES) {
-        phase = period - phase;
-    }
+                               int *size_index,
+                               int *jump_height) {
+    const uint32_t x_phase =
+            demo_triangle_phase(frame, DEMO_X_TRAVEL_FRAMES);
+    const uint32_t depth_phase =
+            demo_triangle_phase(frame, DEMO_DEPTH_TRAVEL_FRAMES);
+    const uint32_t bounce_phase = frame % DEMO_BOUNCE_FRAMES;
 
-    int size = (int)(phase * DEMO_BALL_SIZE_COUNT / (DEMO_TRAVEL_FRAMES + 1u));
+    int size = (int)(depth_phase * DEMO_BALL_SIZE_COUNT /
+                     (DEMO_DEPTH_TRAVEL_FRAMES + 1u));
     if (size >= DEMO_BALL_SIZE_COUNT) {
         size = DEMO_BALL_SIZE_COUNT - 1;
     }
@@ -208,27 +241,31 @@ static void demo_ball_position(const uint32_t frame,
     const int margin = 8;
     const int min_x = margin + radius;
     const int max_x = NTSC_FRAME_WIDTH - 1 - margin - radius;
-    const int min_y = margin + radius;
+    const int min_y = DEMO_HORIZON + radius + 6;
     const int max_y = NTSC_FRAME_HEIGHT - 1 - margin - radius;
     const int base_y = min_y +
-            (max_y - min_y) * (int)phase / DEMO_TRAVEL_FRAMES;
-    const int jump = (int)(4u * DEMO_JUMP_HEIGHT * phase *
-            (DEMO_TRAVEL_FRAMES - phase) /
-            (DEMO_TRAVEL_FRAMES * DEMO_TRAVEL_FRAMES));
+            (max_y - min_y) * (int)depth_phase / DEMO_DEPTH_TRAVEL_FRAMES;
+    const int jump = (int)(4u * DEMO_JUMP_HEIGHT * bounce_phase *
+            (DEMO_BOUNCE_FRAMES - bounce_phase) /
+            (DEMO_BOUNCE_FRAMES * DEMO_BOUNCE_FRAMES));
 
-    *center_x = min_x + (max_x - min_x) * (int)phase / DEMO_TRAVEL_FRAMES;
+    *center_x = min_x +
+            (max_x - min_x) * (int)x_phase / DEMO_X_TRAVEL_FRAMES;
     *center_y = base_y - jump;
     *ground_y = base_y;
     *size_index = size;
+    *jump_height = jump;
 }
 
 static void demo_draw_shadow(uint8_t *framebuffer,
                              const int center_x,
                              const int ground_y,
-                             const int size_index) {
+                             const int size_index,
+                             const int jump_height) {
     const int radius = demo_ball_radii[size_index];
     const int shadow_height = 5 + radius / 6;
     const int shadow_y = ground_y + radius + 4;
+    const int shadow_scale = 256 - jump_height * 128 / DEMO_JUMP_HEIGHT;
 
     for (int offset_y = -shadow_height; offset_y <= shadow_height; ++offset_y) {
         const int y = shadow_y + offset_y;
@@ -237,7 +274,8 @@ static void demo_draw_shadow(uint8_t *framebuffer,
         }
 
         const int half_width =
-                demo_shadow_half_width[size_index][offset_y + DEMO_SHADOW_MAX_HEIGHT];
+                demo_shadow_half_width[size_index][offset_y + DEMO_SHADOW_MAX_HEIGHT] *
+                shadow_scale / 256;
         int left = center_x - half_width;
         int right = center_x + half_width;
         if (left < 0) {
@@ -248,8 +286,13 @@ static void demo_draw_shadow(uint8_t *framebuffer,
         }
 
         const uint8_t floor_shade = demo_floor_shade[y - DEMO_HORIZON];
+        uint8_t shadow_shade =
+                (uint8_t)(floor_shade / 4u + jump_height * 4 / DEMO_JUMP_HEIGHT);
+        if (shadow_shade >= DEMO_FLOOR_SHADES) {
+            shadow_shade = DEMO_FLOOR_SHADES - 1;
+        }
         const uint8_t shadow_color =
-                (uint8_t)(DEMO_FLOOR_DARK_BASE + floor_shade / 4u);
+                (uint8_t)(DEMO_FLOOR_DARK_BASE + shadow_shade);
         memset(&framebuffer[y * NTSC_FRAME_WIDTH + left],
                shadow_color, (size_t)(right - left + 1));
     }
@@ -299,10 +342,12 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
     int center_y;
     int ground_y;
     int size_index;
+    int jump_height;
 
     demo_draw_background(framebuffer, frame);
-    demo_ball_position(frame, &center_x, &center_y, &ground_y, &size_index);
-    demo_draw_shadow(framebuffer, center_x, ground_y, size_index);
+    demo_ball_position(frame, &center_x, &center_y, &ground_y,
+                       &size_index, &jump_height);
+    demo_draw_shadow(framebuffer, center_x, ground_y, size_index, jump_height);
     demo_draw_ball(framebuffer, center_x, center_y, size_index, frame);
 }
 
@@ -330,6 +375,7 @@ static void core1_entry(void) {
 void main(void) {
     demo_init_palette();
     demo_init_floor();
+    demo_init_wave();
     demo_init_ball();
     ntsc_init();
 
