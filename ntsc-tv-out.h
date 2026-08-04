@@ -74,7 +74,7 @@ static uint8_t ntsc_framebuffer[NTSC_FRAME_WIDTH * NTSC_FRAME_HEIGHT] __attribut
 // Scanout reads only the active buffer. A producer may prepare another
 // framebuffer and request an atomic swap at the start of the next frame.
 static const uint8_t *ntsc_active_framebuffer = ntsc_framebuffer;
-static const uint8_t *volatile ntsc_pending_framebuffer;
+static const uint8_t *volatile ntsc_pending_framebuffer = nullptr;
 
 // Ping-pong buffers for DMA double-buffering
 // While one buffer is being transmitted, the other is prepared
@@ -110,7 +110,7 @@ static inline void ntsc_present_framebuffer(const uint8_t *framebuffer) {
     ntsc_pending_framebuffer = framebuffer;
 
     // The IRQ clears this only after switching buffers at a frame boundary.
-    while (ntsc_pending_framebuffer != NULL) {
+    while (ntsc_pending_framebuffer != nullptr) {
         tight_loop_contents();
     }
     __mem_fence_acquire();
@@ -306,11 +306,11 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
 
     if (scanline == 0) {
         const uint8_t *pending_framebuffer = ntsc_pending_framebuffer;
-        if (pending_framebuffer != NULL) {
+        if (pending_framebuffer != nullptr) {
             __mem_fence_acquire();
             ntsc_active_framebuffer = pending_framebuffer;
             __mem_fence_release();
-            ntsc_pending_framebuffer = NULL;
+            ntsc_pending_framebuffer = nullptr;
         }
     }
 
@@ -333,8 +333,8 @@ static inline void ntsc_init() {
      * 315 MHz / 22 = 315/22 MHz = 14.318181... MHz (exactly 4x color burst)
      * 14.318181 MHz / 4 = 3.579545 MHz (EXACT NTSC color burst frequency)
      * This configuration provides PERFECT NTSC timing with 0% error! */
-    const uint32_t system_clock_khz = 315000;
-    const uint32_t pwm_period_cycles = 11;
+    constexpr uint32_t system_clock_khz = 315000;
+    constexpr uint32_t pwm_period_cycles = 11;
 
     vreg_set_voltage(VREG_VOLTAGE_1_30);
     set_sys_clock_khz(system_clock_khz, true);

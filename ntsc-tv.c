@@ -50,8 +50,8 @@ typedef struct {
     int32_t z;
 } demo_vec3_t;
 
-static const uint8_t demo_ball_radii[DEMO_BALL_SIZE_COUNT] = {26, 32, 38};
-static const uint8_t demo_ball_colors[DEMO_BALL_COLOR_COUNT][3] = {
+static constexpr uint8_t demo_ball_radii[DEMO_BALL_SIZE_COUNT] = {26, 32, 38};
+static constexpr uint8_t demo_ball_colors[DEMO_BALL_COLOR_COUNT][3] = {
         {255, 65, 25},
         {255, 215, 25},
         {55, 255, 75},
@@ -59,7 +59,7 @@ static const uint8_t demo_ball_colors[DEMO_BALL_COLOR_COUNT][3] = {
         {70, 90, 255},
         {255, 50, 225}
 };
-static const uint8_t demo_bayer_4x4[16] = {
+static constexpr uint8_t demo_bayer_4x4[16] = {
         0, 8, 2, 10,
         12, 4, 14, 6,
         3, 11, 1, 9,
@@ -626,7 +626,7 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
     }
 }
 
-static void core1_entry(void) {
+[[noreturn]] static void core1_entry(void) {
     uint32_t frame = 0;
     uint8_t *draw_buffer = demo_backbuffer;
     absolute_time_t next_frame = get_absolute_time();
@@ -647,7 +647,7 @@ static void core1_entry(void) {
     }
 }
 
-void main(void) {
+[[noreturn]] int main(void) {
     demo_init_palette();
     demo_init_floor();
     demo_init_wave();
