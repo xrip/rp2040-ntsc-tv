@@ -28,9 +28,10 @@ caused by using this program.
 #endif
 
 #include <hardware/dma.h>
+#include <hardware/gpio.h>
+#include <hardware/irq.h>
 #include <hardware/pwm.h>
 #include <hardware/sync.h>
-#include <hardware/vreg.h>
 
 /* ===========================================================================
  * NTSC Video Format Constants
@@ -327,17 +328,7 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
  * Purpose: Initialize the complete NTSC video generation system
  * =========================================================================== */
 static inline void ntsc_init() {
-    /* Clock Configuration
-     * 315 MHz is the PERFECT frequency for NTSC video generation!
-     * NTSC color burst is exactly 315/88 MHz = 3.579545... MHz
-     * 315 MHz / 22 = 315/22 MHz = 14.318181... MHz (exactly 4x color burst)
-     * 14.318181 MHz / 4 = 3.579545 MHz (EXACT NTSC color burst frequency)
-     * This configuration provides PERFECT NTSC timing with 0% error! */
-    constexpr uint32_t system_clock_khz = 315000;
     constexpr uint32_t pwm_period_cycles = 11;
-
-    vreg_set_voltage(VREG_VOLTAGE_1_30);
-    set_sys_clock_khz(system_clock_khz, true);
 
     // Configure PWM output pin
     gpio_set_function(NTSC_PIN_OUTPUT, GPIO_FUNC_PWM);
@@ -410,9 +401,10 @@ static inline void ntsc_init() {
     // Install and enable interrupt handler
     irq_set_exclusive_handler(DMA_IRQ_0, ntsc_dma_irq_handler);
     irq_set_enabled(DMA_IRQ_0, true);
+}
 
-    // Start video generation by triggering the first DMA transfer
-    dma_start_channel_mask(1u << ntsc_dma_chan_data);
+static inline uint32_t ntsc_start_mask(void) {
+    return 1u << ntsc_dma_chan_data;
 }
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options

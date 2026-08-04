@@ -6,7 +6,7 @@
 #include <pico/multicore.h>
 #include <pico/time.h>
 
-#include "ntsc-tv-out.h"
+#include <graphics.h>
 
 enum {
     DEMO_HORIZON = 68,
@@ -68,13 +68,13 @@ static constexpr uint8_t demo_bayer_4x4[16] = {
 
 static uint8_t demo_ball_sprites[DEMO_BALL_SIZE_COUNT]
                                 [DEMO_BALL_MAX_DIAMETER * DEMO_BALL_MAX_DIAMETER];
-static uint8_t demo_backbuffer[NTSC_FRAME_WIDTH * NTSC_FRAME_HEIGHT]
+static uint8_t demo_backbuffer[GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT]
                               __attribute__ ((aligned (4)));
 static uint8_t demo_shadow_half_width[DEMO_BALL_SIZE_COUNT]
                                      [DEMO_SHADOW_MAX_HEIGHT * 2 + 1];
-static uint32_t demo_floor_x_step[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
-static uint32_t demo_floor_z[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
-static uint8_t demo_floor_shade[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
+static uint32_t demo_floor_x_step[GRAPHICS_FRAME_HEIGHT - DEMO_HORIZON];
+static uint32_t demo_floor_z[GRAPHICS_FRAME_HEIGHT - DEMO_HORIZON];
+static uint8_t demo_floor_shade[GRAPHICS_FRAME_HEIGHT - DEMO_HORIZON];
 static int8_t demo_wave_lut[256];
 static int16_t demo_sine_lut[256];
 static uint8_t demo_object_depth[DEMO_OBJECT_SIZE * DEMO_OBJECT_SIZE];
@@ -83,7 +83,10 @@ static inline void demo_set_rgb(const uint8_t index,
                                 const uint8_t red,
                                 const uint8_t green,
                                 const uint8_t blue) {
-    ntsc_set_color(index, blue, red, green);
+    graphics_set_palette(index,
+                         (uint32_t)red << 16 |
+                         (uint32_t)green << 8 |
+                         blue);
 }
 
 static void demo_init_palette(void) {
@@ -118,7 +121,7 @@ static void demo_init_palette(void) {
 }
 
 static void demo_init_floor(void) {
-    const int floor_height = NTSC_FRAME_HEIGHT - DEMO_HORIZON;
+    const int floor_height = GRAPHICS_FRAME_HEIGHT - DEMO_HORIZON;
 
     for (int index = 0; index < floor_height; ++index) {
         const int screen_depth = index + 1;
@@ -249,14 +252,16 @@ static void demo_draw_background(uint8_t *framebuffer, const uint32_t frame) {
     for (int y = 0; y < DEMO_HORIZON; ++y) {
         const uint8_t color = (uint8_t)(DEMO_SKY_BASE +
                 y * (DEMO_SKY_SHADES - 1) / (DEMO_HORIZON - 1));
-        memset(&framebuffer[y * NTSC_FRAME_WIDTH], color, NTSC_FRAME_WIDTH);
+        memset(&framebuffer[y * GRAPHICS_FRAME_WIDTH], color,
+               GRAPHICS_FRAME_WIDTH);
     }
 
     const uint32_t floor_scroll = frame * (8u << 8);
-    for (int y = DEMO_HORIZON; y < NTSC_FRAME_HEIGHT; ++y) {
+    for (int y = DEMO_HORIZON; y < GRAPHICS_FRAME_HEIGHT; ++y) {
         const int floor_index = y - DEMO_HORIZON;
         const uint32_t x_step = demo_floor_x_step[floor_index];
-        uint32_t world_x = (128u << 16) - (NTSC_FRAME_WIDTH / 2u) * x_step;
+        uint32_t world_x =
+                (128u << 16) - (GRAPHICS_FRAME_WIDTH / 2u) * x_step;
         const uint32_t world_z = demo_floor_z[floor_index] + floor_scroll;
         const uint8_t wave_time = (uint8_t)(frame * 2u);
         const int32_t row_wave_x =
@@ -265,9 +270,9 @@ static void demo_draw_background(uint8_t *framebuffer, const uint32_t frame) {
         const uint8_t shade = demo_floor_shade[floor_index];
         const uint8_t dark = (uint8_t)(DEMO_FLOOR_DARK_BASE + shade);
         const uint8_t light = (uint8_t)(DEMO_FLOOR_LIGHT_BASE + shade);
-        uint8_t *row = &framebuffer[y * NTSC_FRAME_WIDTH];
+        uint8_t *row = &framebuffer[y * GRAPHICS_FRAME_WIDTH];
 
-        for (int x = 0; x < NTSC_FRAME_WIDTH; ++x) {
+        for (int x = 0; x < GRAPHICS_FRAME_WIDTH; ++x) {
             const int32_t column_wave_z =
                     demo_wave_lut[(uint8_t)((world_x >> DEMO_WAVE_COORD_SHIFT) -
                                             wave_time)] * DEMO_WAVE_SCALE;
@@ -310,9 +315,9 @@ static void demo_ball_position(const uint32_t frame,
     const int radius = demo_ball_radii[size];
     const int margin = 8;
     const int min_x = margin + radius;
-    const int max_x = NTSC_FRAME_WIDTH - 1 - margin - radius;
+    const int max_x = GRAPHICS_FRAME_WIDTH - 1 - margin - radius;
     const int min_y = DEMO_HORIZON + radius + 6;
-    const int max_y = NTSC_FRAME_HEIGHT - 1 - margin - radius;
+    const int max_y = GRAPHICS_FRAME_HEIGHT - 1 - margin - radius;
     const int base_y = min_y +
             (max_y - min_y) * (int)depth_phase / DEMO_DEPTH_TRAVEL_FRAMES;
     const int jump = (int)(4u * DEMO_JUMP_HEIGHT * bounce_phase *
@@ -344,7 +349,7 @@ static void demo_draw_shadow(uint8_t *framebuffer,
 
     for (int offset_y = -shadow_height; offset_y <= shadow_height; ++offset_y) {
         const int y = shadow_y + offset_y;
-        if (y < DEMO_HORIZON || y >= NTSC_FRAME_HEIGHT) {
+        if (y < DEMO_HORIZON || y >= GRAPHICS_FRAME_HEIGHT) {
             continue;
         }
 
@@ -356,8 +361,8 @@ static void demo_draw_shadow(uint8_t *framebuffer,
         if (left < 0) {
             left = 0;
         }
-        if (right >= NTSC_FRAME_WIDTH) {
-            right = NTSC_FRAME_WIDTH - 1;
+        if (right >= GRAPHICS_FRAME_WIDTH) {
+            right = GRAPHICS_FRAME_WIDTH - 1;
         }
 
         const uint8_t floor_shade = demo_floor_shade[y - DEMO_HORIZON];
@@ -368,7 +373,8 @@ static void demo_draw_shadow(uint8_t *framebuffer,
         }
         const uint8_t shadow_color =
                 (uint8_t)(DEMO_FLOOR_DARK_BASE + shadow_shade);
-        uint8_t *destination = &framebuffer[y * NTSC_FRAME_WIDTH + left];
+        uint8_t *destination =
+                &framebuffer[y * GRAPHICS_FRAME_WIDTH + left];
         if (visibility >= 16) {
             memset(destination, shadow_color, (size_t)(right - left + 1));
         } else {
@@ -392,14 +398,15 @@ static void demo_draw_ball(uint8_t *framebuffer,
 
     for (int offset_y = -radius; offset_y <= radius; ++offset_y) {
         const int y = center_y + offset_y;
-        if (y < 0 || y >= NTSC_FRAME_HEIGHT) {
+        if (y < 0 || y >= GRAPHICS_FRAME_HEIGHT) {
             continue;
         }
 
         const uint8_t *source = &sprite[
                 (offset_y + DEMO_BALL_MAX_RADIUS) * DEMO_BALL_MAX_DIAMETER +
                 DEMO_BALL_MAX_RADIUS - radius];
-        uint8_t *destination = &framebuffer[y * NTSC_FRAME_WIDTH + center_x - radius];
+        uint8_t *destination =
+                &framebuffer[y * GRAPHICS_FRAME_WIDTH + center_x - radius];
 
         for (int offset_x = -radius; offset_x <= radius; ++offset_x) {
             const uint8_t shade = *source++;
@@ -441,7 +448,7 @@ static void demo_draw_3d_point(uint8_t *framebuffer,
     for (int offset_y = -point_radius; offset_y <= point_radius; ++offset_y) {
         const int y = screen_y + offset_y;
         const int object_y = depth_y + offset_y;
-        if (y < 0 || y >= NTSC_FRAME_HEIGHT ||
+        if (y < 0 || y >= GRAPHICS_FRAME_HEIGHT ||
             object_y < 0 || object_y >= DEMO_OBJECT_SIZE) {
             continue;
         }
@@ -454,7 +461,7 @@ static void demo_draw_3d_point(uint8_t *framebuffer,
 
             const int x = screen_x + offset_x;
             const int object_x = depth_x + offset_x;
-            if (x < 0 || x >= NTSC_FRAME_WIDTH ||
+            if (x < 0 || x >= GRAPHICS_FRAME_WIDTH ||
                 object_x < 0 || object_x >= DEMO_OBJECT_SIZE ||
                 !demo_pixel_visible(x, y, visibility)) {
                 continue;
@@ -464,7 +471,7 @@ static void demo_draw_3d_point(uint8_t *framebuffer,
                     &demo_object_depth[object_y * DEMO_OBJECT_SIZE + object_x];
             if (depth >= *stored_depth) {
                 *stored_depth = (uint8_t)depth;
-                framebuffer[y * NTSC_FRAME_WIDTH + x] =
+                framebuffer[y * GRAPHICS_FRAME_WIDTH + x] =
                         demo_shaded_color(frame, shade, x, y);
             }
         }
@@ -478,7 +485,7 @@ static void demo_render_torus(uint8_t *framebuffer,
         return;
     }
 
-    const int center_x = NTSC_FRAME_WIDTH / 2;
+    const int center_x = GRAPHICS_FRAME_WIDTH / 2;
     const int center_y = 116 + demo_wave_lut[(uint8_t)(frame * 2u)] / 12;
     const uint8_t angle_y = (uint8_t)(frame * 2u);
     const uint8_t angle_x = (uint8_t)(frame + 24u);
@@ -533,7 +540,7 @@ static void demo_render_helix(uint8_t *framebuffer,
         return;
     }
 
-    const int center_x = NTSC_FRAME_WIDTH / 2;
+    const int center_x = GRAPHICS_FRAME_WIDTH / 2;
     const int center_y = 116 + demo_wave_lut[(uint8_t)(frame * 2u)] / 14;
     const uint8_t angle_y = (uint8_t)(frame * 3u);
     const uint8_t angle_x =
@@ -628,14 +635,15 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
 
 [[noreturn]] static void core1_entry(void) {
     uint32_t frame = 0;
+    uint8_t *const primary_buffer = graphics_get_framebuffer();
     uint8_t *draw_buffer = demo_backbuffer;
     absolute_time_t next_frame = get_absolute_time();
 
     while (true) {
         demo_render_frame(draw_buffer, frame++);
-        ntsc_present_framebuffer(draw_buffer);
+        graphics_present_framebuffer(draw_buffer);
         draw_buffer = draw_buffer == demo_backbuffer
-                      ? ntsc_framebuffer
+                      ? primary_buffer
                       : demo_backbuffer;
 
         next_frame = delayed_by_ms(next_frame, DEMO_FRAME_TIME_MS);
@@ -652,7 +660,7 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
     demo_init_floor();
     demo_init_wave();
     demo_init_ball();
-    ntsc_init();
+    graphics_init();
 
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);

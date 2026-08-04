@@ -16,6 +16,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 pico_sdk_init()
 
+option(GRAPHICS_DUAL_OUTPUT "Enable synchronized VGA and NTSC output" ON)
+add_subdirectory(drivers/vga-nextgen)
+add_subdirectory(drivers/graphics)
+
 #add_compile_options(-ffunction-sections -fdata-sections -fms-extensions -O3)
 add_compile_options(-flto -fwhole-program -ffunction-sections -fdata-sections -fms-extensions -O3)
 add_link_options(-flto -fwhole-program)
@@ -49,6 +53,7 @@ pico_set_printf_implementation(${PROJECT_NAME} none)
 target_sources(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ntsc-tv.c)
 
 target_link_libraries(${PROJECT_NAME}
+        graphics
         pico_runtime
         hardware_dma
         hardware_pwm
