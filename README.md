@@ -118,6 +118,13 @@ This is a portable VGA module with the CMake target `vga-nextgen`.
 Linking this target adds `VGA=1` to the final program. The old emulator-specific
 VGA driver and its large mode switch have been removed.
 
+The VGA resistor output has two bits for each RGB channel. By default,
+`VGA_ENABLE_DITHER=1` uses two 256-entry palette tables. The source-row and
+frame bits change the order of the two DAC samples, as in the old VGA driver.
+The phase is selected before the pixel loop; the loop still has one table read
+for each source pixel. Set `VGA_ENABLE_DITHER=0` at compile time to remove the
+second 512-byte table and all phase work.
+
 ### `drivers/ntsc-tv`
 
 This is a portable NTSC module with the CMake target `ntsc-tv-driver`.

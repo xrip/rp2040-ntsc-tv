@@ -42,7 +42,12 @@ static const struct pio_program vga_dual_program = {
         .origin = -1
 };
 
+#if VGA_ENABLE_DITHER
+static uint16_t vga_dual_palette[2][256] __attribute__((aligned(4)));
+static uint8_t vga_dual_frame_phase;
+#else
 static uint16_t vga_dual_palette[256] __attribute__((aligned(4)));
+#endif
 static uint32_t vga_dual_scanline_buffers[4][VGA_DUAL_LINE_WORDS]
         __attribute__((aligned(16)));
 
@@ -86,23 +91,29 @@ static __force_inline void vga_dual_generate_active_line(
     uint16_t *output = (uint16_t *)((uint8_t *)line_buffer +
                                   VGA_DUAL_ACTIVE_OFFSET);
     uint32_t groups = VGA_DUAL_SOURCE_WIDTH / 4u;
+#if VGA_ENABLE_DITHER
+    const uint16_t *palette =
+            vga_dual_palette[(source_line ^ vga_dual_frame_phase) & 1u];
+#else
+    const uint16_t *palette = vga_dual_palette;
+#endif
 
 #pragma GCC unroll 4
     do {
 #if PICO_RP2350
         uint32_t pixels;
         __builtin_memcpy(&pixels, source, sizeof(pixels));
-        const uint32_t pixel0 = vga_dual_palette[(uint8_t)pixels];
-        const uint32_t pixel1 = vga_dual_palette[(uint8_t)(pixels >> 8)];
-        const uint32_t pixel2 = vga_dual_palette[(uint8_t)(pixels >> 16)];
-        const uint32_t pixel3 = vga_dual_palette[(uint8_t)(pixels >> 24)];
+        const uint32_t pixel0 = palette[(uint8_t)pixels];
+        const uint32_t pixel1 = palette[(uint8_t)(pixels >> 8)];
+        const uint32_t pixel2 = palette[(uint8_t)(pixels >> 16)];
+        const uint32_t pixel3 = palette[(uint8_t)(pixels >> 24)];
         ((uint32_t *)output)[0] = pixel0 | pixel1 << 16;
         ((uint32_t *)output)[1] = pixel2 | pixel3 << 16;
 #else
-        output[0] = vga_dual_palette[source[0]];
-        output[1] = vga_dual_palette[source[1]];
-        output[2] = vga_dual_palette[source[2]];
-        output[3] = vga_dual_palette[source[3]];
+        output[0] = palette[source[0]];
+        output[1] = palette[source[1]];
+        output[2] = palette[source[2]];
+        output[3] = palette[source[3]];
 #endif
         source += 4;
         output += 4;
@@ -158,6 +169,11 @@ static void __time_critical_func(vga_dual_dma_handler)(void) {
     if (following_line == VGA_DUAL_TOTAL_LINES) {
         following_line = 0;
     }
+#if VGA_ENABLE_DITHER
+    if (following_line == 0u) {
+        vga_dual_frame_phase ^= 1u;
+    }
+#endif
     vga_dual_prepare_line(following_line);
 }
 
@@ -181,12 +197,22 @@ void vga_set_palette(const uint8_t index, const uint32_t color888) {
             upper_level[green] << 2 |
             upper_level[blue]);
 
-    vga_dual_palette[index] = (uint16_t)(first | (uint16_t)second << 8);
+#if VGA_ENABLE_DITHER
+    vga_dual_palette[0][index] =
+            (uint16_t)(second | (uint16_t)first << 8);
+    vga_dual_palette[1][index] =
+            (uint16_t)(first | (uint16_t)second << 8);
+#else
+    vga_dual_palette[index] = (uint16_t)(second | (uint16_t)first << 8);
+#endif
 }
 
 void vga_init(const uint8_t *framebuffer) {
     vga_dual_active_framebuffer = framebuffer;
     vga_dual_pending_framebuffer = NULL;
+#if VGA_ENABLE_DITHER
+    vga_dual_frame_phase = 0;
+#endif
     vga_dual_make_templates();
     vga_dual_generate_active_line(
             0, vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_0));

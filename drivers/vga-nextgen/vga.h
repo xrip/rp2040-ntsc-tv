@@ -12,6 +12,10 @@ extern "C" {
 #define VGA_BASE_PIN 6
 #endif
 
+#ifndef VGA_ENABLE_DITHER
+#define VGA_ENABLE_DITHER 1
+#endif
+
 #ifndef TEXTMODE_COLS
 #define TEXTMODE_COLS 80
 #endif
