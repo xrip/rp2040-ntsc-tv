@@ -1,149 +1,351 @@
-#include <pico/time.h>
 #include <math.h>
-#include <pico/multicore.h>
+#include <string.h>
 
-#include <hardware/gpio.h>
 #include <hardware/clocks.h>
+#include <hardware/gpio.h>
+#include <pico/multicore.h>
+#include <pico/time.h>
+
 #include "ntsc-tv-out.h"
 
-// ------------------------------------------------------------
-// Wavy checkerboard with 256-color gradient using LUT
-// ------------------------------------------------------------
-static int8_t wave_lut[256]; // amplitude-scaled sine (cos via +90° phase shift)
-static uint8_t step_x;       // phase step per pixel along x
-static uint8_t step_y;       // phase step per pixel along y
-static uint8_t tstep_1;      // phase step per frame for first wave
-static uint8_t tstep_2;      // phase step per frame for second wave (0.8x speed)
+enum {
+    DEMO_HORIZON = 68,
+    DEMO_FRAME_TIME_MS = 33,
+    DEMO_TRAVEL_FRAMES = 120,
+    DEMO_JUMP_HEIGHT = 42,
 
-// Build LUT and fixed-point steps (called once at startup)
-static void init_wave_lut(float amp, float fx, float fy, float t_speed) {
-    const float two_pi = 6.283185307179586f;
-    // Fill amplitude-scaled sine LUT
-    for (int i = 0; i < 256; ++i) {
-        float s = sinf((two_pi * i) / 256.0f);
-        int v = (int)lrintf(amp * s);
-        if (v < -128) v = -128;
-        if (v > 127) v = 127;
-        wave_lut[i] = (int8_t)v;
-    }
-    // Convert radians-per-pixel to phase steps in [0..255]
-    const float phase_scale = 256.0f / two_pi;
-    step_x  = (uint8_t)lrintf(fx       * phase_scale);    // ~4 for fx=0.09
-    step_y  = (uint8_t)lrintf(fy       * phase_scale);    // ~5 for fy=0.11
-    tstep_1 = (uint8_t)lrintf(t_speed  * phase_scale);    // ~5 for 0.12
-    tstep_2 = (uint8_t)lrintf((t_speed * 0.8f) * phase_scale); // ~4
-}
+    DEMO_SKY_BASE = 0,
+    DEMO_SKY_SHADES = 16,
+    DEMO_FLOOR_DARK_BASE = 16,
+    DEMO_FLOOR_LIGHT_BASE = 32,
+    DEMO_FLOOR_SHADES = 16,
+    DEMO_BALL_BASE = 64,
+    DEMO_BALL_SHADES = 32,
+    DEMO_BALL_COLOR_COUNT = 6,
+    DEMO_BALL_CROSSFADE_FRAMES = 32,
 
-static inline uint8_t checker_color_at(int x, int y, int frame) {
-    // Phase accumulation (mod 256 via uint8_t wrap)
-    const uint8_t phase_y = (uint8_t)(y * step_y + frame * tstep_1);
-    const uint8_t phase_x = (uint8_t)(x * step_x + frame * tstep_2 + 64); // cos = sin(+90°), 90° = 64 in 256-cycle
-
-    // Wavy warp via LUT
-    const int sx = x + wave_lut[phase_y];
-    const int sy = y + wave_lut[phase_x];
-
-    // Checker parity from warped coordinates
-    const int cx = sx / 16; // tile size 16
-    const int cy = sy / 16;
-    const int parity = (cx ^ cy) & 1;
-
-    // Full 256-color gradient across diagonal + time
-    const uint8_t base = (uint8_t)(sx + sy + (frame << 1));
-
-    // Opposite squares get shifted gradient to keep contrast while covering all 256 indices
-    return parity ? (uint8_t)(base ^ 0x80) : base;
-}
-
-// Core 1 entry: fill the framebuffer continuously
-static void core1_entry() {
-    int frame = 0;
-    while (1) {
-        for (int y = 0; y < NTSC_FRAME_HEIGHT; y++) {
-            uint8_t *row = &ntsc_framebuffer[y * NTSC_FRAME_WIDTH];
-            for (int x = 0; x < NTSC_FRAME_WIDTH; x++) {
-                row[x] = checker_color_at(x, y, frame);
-            }
-        }
-        frame++;
-        // Optional pacing
-        // tight_loop_contents();
-    }
-}
-
-
-// VGA 256-color palette (0xRRGGBB)
-static const uint32_t vga_palette[256] = {
-        0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA, // 0-7
-        0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF, // 8-15
-        0x000000, 0x141414, 0x202020, 0x2C2C2C, 0x383838, 0x444444, 0x505050, 0x606060, // 16-23
-        0x707070, 0x808080, 0x909090, 0xA0A0A0, 0xB4B4B4, 0xC8C8C8, 0xDCDCDC, 0xF0F0F0, // 24-31
-        0x0000FF, 0x4100FF, 0x8200FF, 0xBE00FF, 0xFF00FF, 0xFF00BE, 0xFF0082, 0xFF0041, // 32-39
-        0xFF0000, 0xFF4100, 0xFF8200, 0xFFBE00, 0xFFFF00, 0xBEFF00, 0x82FF00, 0x41FF00, // 40-47
-        0x00FF00, 0x00FF41, 0x00FF82, 0x00FFBE, 0x00FFFF, 0x00BEFF, 0x0082FF, 0x0041FF, // 48-55
-        0x8282FF, 0x9E82FF, 0xBE82FF, 0xDB82FF, 0xFF82FF, 0xFF82DB, 0xFF82BE, 0xFF829E, // 56-63
-        0xFF8282, 0xFF9E82, 0xFFBE82, 0xFFDB82, 0xFFFF82, 0xDBFF82, 0xBEFF82, 0x9EFF82, // 64-71
-        0x82FF82, 0x82FF9E, 0x82FFBE, 0x82FFDB, 0x82FFFF, 0x82DBFF, 0x82BEFF, 0x829EFF, // 72-79
-        0xB6B6FF, 0xC6B6FF, 0xDBB6FF, 0xEBB6FF, 0xFFB6FF, 0xFFB6EB, 0xFFB6DB, 0xFFB6C6, // 80-87
-        0xFFB6B6, 0xFFC6B6, 0xFFDBB6, 0xFFEBB6, 0xFFFFB6, 0xEBFFB6, 0xDBFFB6, 0xC6FFB6, // 88-95
-        0xB6FFB6, 0xB6FFC6, 0xB6FFDB, 0xB6FFEB, 0xB6FFFF, 0xB6EBFF, 0xB6DBFF, 0xB6C6FF, // 96-103
-        0x000071, 0x1C0071, 0x390071, 0x550071, 0x710071, 0x710055, 0x710039, 0x71001C, // 104-111
-        0x710000, 0x711C00, 0x713900, 0x715500, 0x717100, 0x557100, 0x397100, 0x1C7100, // 112-119
-        0x007100, 0x00711C, 0x007139, 0x007155, 0x007171, 0x005571, 0x003971, 0x001C71, // 120-127
-        0x393971, 0x453971, 0x553971, 0x613971, 0x713971, 0x713961, 0x713955, 0x713945, // 128-135
-        0x713939, 0x714539, 0x715539, 0x716139, 0x717139, 0x617139, 0x557139, 0x457139, // 136-143
-        0x397139, 0x397145, 0x397155, 0x397161, 0x397171, 0x396171, 0x395571, 0x394571, // 144-151
-        0x515171, 0x595171, 0x615171, 0x695171, 0x715171, 0x715169, 0x715161, 0x715159, // 152-159
-        0x715151, 0x715951, 0x716151, 0x716951, 0x717151, 0x697151, 0x617151, 0x597151, // 160-167
-        0x517151, 0x517159, 0x517161, 0x517169, 0x517171, 0x516971, 0x516171, 0x515971, // 168-175
-        0x000041, 0x100041, 0x200041, 0x310041, 0x410041, 0x410031, 0x410020, 0x410010, // 176-183
-        0x410000, 0x411000, 0x412000, 0x413100, 0x414100, 0x314100, 0x204100, 0x104100, // 184-191
-        0x004100, 0x004110, 0x004120, 0x004131, 0x004141, 0x003141, 0x002041, 0x001041, // 192-199
-        0x202041, 0x282041, 0x312041, 0x392041, 0x412041, 0x412039, 0x412031, 0x412028, // 200-207
-        0x412020, 0x412820, 0x413120, 0x413920, 0x414120, 0x394120, 0x314120, 0x284120, // 208-215
-        0x204120, 0x204128, 0x204131, 0x204139, 0x204141, 0x203941, 0x203141, 0x202841, // 216-223
-        0x2D2D41, 0x312D41, 0x392D41, 0x3D2D41, 0x412D41, 0x412D3D, 0x412D39, 0x412D31, // 224-231
-        0x412D2D, 0x41312D, 0x41392D, 0x413D2D, 0x41412D, 0x3D412D, 0x39412D, 0x31412D, // 232-239
-        0x2D412D, 0x2D4131, 0x2D4139, 0x2D413D, 0x2D4141, 0x2D3D41, 0x2D3941, 0x2D3141, // 240-247
-        0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000  // 248-255
+    DEMO_BALL_SIZE_COUNT = 3,
+    DEMO_BALL_MAX_RADIUS = 38,
+    DEMO_BALL_MAX_DIAMETER = DEMO_BALL_MAX_RADIUS * 2 + 1,
+    DEMO_TRANSPARENT = 255,
+    DEMO_SHADOW_MAX_HEIGHT = 12
 };
 
-void ntsc_init_palette(void) {
-    for (int i = 0; i < 256; i++) {
-        uint32_t rgb = vga_palette[i];
-        uint8_t r = (rgb >> 16) & 0xFF;
-        uint8_t g = (rgb >> 8) & 0xFF;
-        uint8_t b = (rgb >> 0) & 0xFF;
+static const uint8_t demo_ball_radii[DEMO_BALL_SIZE_COUNT] = {26, 32, 38};
+static const uint8_t demo_ball_colors[DEMO_BALL_COLOR_COUNT][3] = {
+        {255, 65, 25},
+        {255, 215, 25},
+        {55, 255, 75},
+        {25, 235, 255},
+        {70, 90, 255},
+        {255, 50, 225}
+};
+static const uint8_t demo_bayer_4x4[16] = {
+        0, 8, 2, 10,
+        12, 4, 14, 6,
+        3, 11, 1, 9,
+        15, 7, 13, 5
+};
 
-        // ntsc_set_color expects parameters in order: (blue, red, green)
-        ntsc_set_color((uint8_t)i, b, r, g);
+static uint8_t demo_ball_sprites[DEMO_BALL_SIZE_COUNT]
+                                [DEMO_BALL_MAX_DIAMETER * DEMO_BALL_MAX_DIAMETER];
+static uint8_t demo_backbuffer[NTSC_FRAME_WIDTH * NTSC_FRAME_HEIGHT]
+                              __attribute__ ((aligned (4)));
+static uint8_t demo_shadow_half_width[DEMO_BALL_SIZE_COUNT]
+                                     [DEMO_SHADOW_MAX_HEIGHT * 2 + 1];
+static uint32_t demo_floor_x_step[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
+static uint32_t demo_floor_z[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
+static uint8_t demo_floor_shade[NTSC_FRAME_HEIGHT - DEMO_HORIZON];
+
+static inline void demo_set_rgb(const uint8_t index,
+                                const uint8_t red,
+                                const uint8_t green,
+                                const uint8_t blue) {
+    ntsc_set_color(index, blue, red, green);
+}
+
+static void demo_init_palette(void) {
+    for (int shade = 0; shade < DEMO_SKY_SHADES; ++shade) {
+        demo_set_rgb((uint8_t)(DEMO_SKY_BASE + shade),
+                     (uint8_t)(3 + shade),
+                     (uint8_t)(5 + shade * 2),
+                     (uint8_t)(20 + shade * 5));
+    }
+
+    for (int shade = 0; shade < DEMO_FLOOR_SHADES; ++shade) {
+        const uint8_t dark = (uint8_t)(2 + shade * 45 /
+                                           (DEMO_FLOOR_SHADES - 1));
+        const uint8_t light = (uint8_t)(8 + shade * 220 /
+                                            (DEMO_FLOOR_SHADES - 1));
+        demo_set_rgb((uint8_t)(DEMO_FLOOR_DARK_BASE + shade), dark, dark, dark);
+        demo_set_rgb((uint8_t)(DEMO_FLOOR_LIGHT_BASE + shade), light, light, light);
+    }
+
+    for (int color = 0; color < DEMO_BALL_COLOR_COUNT; ++color) {
+        for (int shade = 0; shade < DEMO_BALL_SHADES; ++shade) {
+            demo_set_rgb((uint8_t)(DEMO_BALL_BASE +
+                                   color * DEMO_BALL_SHADES + shade),
+                         (uint8_t)(demo_ball_colors[color][0] *
+                                   (shade + 2) / 33),
+                         (uint8_t)(demo_ball_colors[color][1] *
+                                   (shade + 2) / 33),
+                         (uint8_t)(demo_ball_colors[color][2] *
+                                   (shade + 2) / 33));
+        }
     }
 }
 
-void main() {
-    ntsc_init_palette();
+static void demo_init_floor(void) {
+    const int floor_height = NTSC_FRAME_HEIGHT - DEMO_HORIZON;
+
+    for (int index = 0; index < floor_height; ++index) {
+        const int screen_depth = index + 1;
+        // 16.16 world coordinates keep nearby scanlines from collapsing
+        // onto the same checker row after the perspective division.
+        const uint32_t x_step = (192u << 8) / (uint32_t)screen_depth;
+
+        demo_floor_x_step[index] = x_step;
+        demo_floor_z[index] = 144u * x_step;
+        demo_floor_shade[index] =
+                (uint8_t)(screen_depth * (DEMO_FLOOR_SHADES - 1) / floor_height);
+    }
+
+}
+
+static void demo_init_ball(void) {
+    for (int size = 0; size < DEMO_BALL_SIZE_COUNT; ++size) {
+        const int radius = demo_ball_radii[size];
+        uint8_t *sprite = demo_ball_sprites[size];
+        memset(sprite, DEMO_TRANSPARENT,
+               DEMO_BALL_MAX_DIAMETER * DEMO_BALL_MAX_DIAMETER);
+
+        for (int y = -radius; y <= radius; ++y) {
+            for (int x = -radius; x <= radius; ++x) {
+                const int distance_squared = x * x + y * y;
+                if (distance_squared > radius * radius) {
+                    continue;
+                }
+
+                const float z = sqrtf((float)(radius * radius - distance_squared));
+                const float normal_x = (float)x / (float)radius;
+                const float normal_y = (float)y / (float)radius;
+                const float normal_z = z / (float)radius;
+                float light = -0.42f * normal_x - 0.55f * normal_y + 0.72f * normal_z;
+                if (light < 0.0f) {
+                    light = 0.0f;
+                }
+
+                float highlight = light * light;
+                highlight *= highlight;
+                highlight *= highlight;
+
+                int shade = (int)lrintf(2.0f + light * 23.0f + highlight * 6.0f);
+                if (shade >= DEMO_BALL_SHADES) {
+                    shade = DEMO_BALL_SHADES - 1;
+                }
+
+                const int sprite_x = x + DEMO_BALL_MAX_RADIUS;
+                const int sprite_y = y + DEMO_BALL_MAX_RADIUS;
+                sprite[sprite_y * DEMO_BALL_MAX_DIAMETER + sprite_x] =
+                        (uint8_t)shade;
+            }
+        }
+
+        const int shadow_height = 5 + radius / 6;
+        for (int y = -shadow_height; y <= shadow_height; ++y) {
+            const float row = (float)y / (float)shadow_height;
+            const int half_width = (int)lrintf((float)radius * sqrtf(1.0f - row * row));
+            demo_shadow_half_width[size][y + DEMO_SHADOW_MAX_HEIGHT] =
+                    (uint8_t)half_width;
+        }
+    }
+}
+
+static void demo_draw_background(uint8_t *framebuffer, const uint32_t frame) {
+    for (int y = 0; y < DEMO_HORIZON; ++y) {
+        const uint8_t color = (uint8_t)(DEMO_SKY_BASE +
+                y * (DEMO_SKY_SHADES - 1) / (DEMO_HORIZON - 1));
+        memset(&framebuffer[y * NTSC_FRAME_WIDTH], color, NTSC_FRAME_WIDTH);
+    }
+
+    const uint32_t floor_scroll = frame * (8u << 8);
+    for (int y = DEMO_HORIZON; y < NTSC_FRAME_HEIGHT; ++y) {
+        const int floor_index = y - DEMO_HORIZON;
+        const uint32_t x_step = demo_floor_x_step[floor_index];
+        uint32_t world_x = (128u << 16) - (NTSC_FRAME_WIDTH / 2u) * x_step;
+        const uint32_t world_z = demo_floor_z[floor_index] + floor_scroll;
+        const uint32_t z_tile = world_z >> 16;
+        const uint8_t shade = demo_floor_shade[floor_index];
+        const uint8_t dark = (uint8_t)(DEMO_FLOOR_DARK_BASE + shade);
+        const uint8_t light = (uint8_t)(DEMO_FLOOR_LIGHT_BASE + shade);
+        uint8_t *row = &framebuffer[y * NTSC_FRAME_WIDTH];
+
+        for (int x = 0; x < NTSC_FRAME_WIDTH; ++x) {
+            const uint32_t x_tile = world_x >> 16;
+            row[x] = ((x_tile ^ z_tile) & 1u) ? light : dark;
+            world_x += x_step;
+        }
+    }
+}
+
+static void demo_ball_position(const uint32_t frame,
+                               int *center_x,
+                               int *center_y,
+                               int *ground_y,
+                               int *size_index) {
+    const uint32_t period = DEMO_TRAVEL_FRAMES * 2u;
+    uint32_t phase = frame % period;
+    if (phase > DEMO_TRAVEL_FRAMES) {
+        phase = period - phase;
+    }
+
+    int size = (int)(phase * DEMO_BALL_SIZE_COUNT / (DEMO_TRAVEL_FRAMES + 1u));
+    if (size >= DEMO_BALL_SIZE_COUNT) {
+        size = DEMO_BALL_SIZE_COUNT - 1;
+    }
+
+    const int radius = demo_ball_radii[size];
+    const int margin = 8;
+    const int min_x = margin + radius;
+    const int max_x = NTSC_FRAME_WIDTH - 1 - margin - radius;
+    const int min_y = margin + radius;
+    const int max_y = NTSC_FRAME_HEIGHT - 1 - margin - radius;
+    const int base_y = min_y +
+            (max_y - min_y) * (int)phase / DEMO_TRAVEL_FRAMES;
+    const int jump = (int)(4u * DEMO_JUMP_HEIGHT * phase *
+            (DEMO_TRAVEL_FRAMES - phase) /
+            (DEMO_TRAVEL_FRAMES * DEMO_TRAVEL_FRAMES));
+
+    *center_x = min_x + (max_x - min_x) * (int)phase / DEMO_TRAVEL_FRAMES;
+    *center_y = base_y - jump;
+    *ground_y = base_y;
+    *size_index = size;
+}
+
+static void demo_draw_shadow(uint8_t *framebuffer,
+                             const int center_x,
+                             const int ground_y,
+                             const int size_index) {
+    const int radius = demo_ball_radii[size_index];
+    const int shadow_height = 5 + radius / 6;
+    const int shadow_y = ground_y + radius + 4;
+
+    for (int offset_y = -shadow_height; offset_y <= shadow_height; ++offset_y) {
+        const int y = shadow_y + offset_y;
+        if (y < DEMO_HORIZON || y >= NTSC_FRAME_HEIGHT) {
+            continue;
+        }
+
+        const int half_width =
+                demo_shadow_half_width[size_index][offset_y + DEMO_SHADOW_MAX_HEIGHT];
+        int left = center_x - half_width;
+        int right = center_x + half_width;
+        if (left < 0) {
+            left = 0;
+        }
+        if (right >= NTSC_FRAME_WIDTH) {
+            right = NTSC_FRAME_WIDTH - 1;
+        }
+
+        const uint8_t floor_shade = demo_floor_shade[y - DEMO_HORIZON];
+        const uint8_t shadow_color =
+                (uint8_t)(DEMO_FLOOR_DARK_BASE + floor_shade / 4u);
+        memset(&framebuffer[y * NTSC_FRAME_WIDTH + left],
+               shadow_color, (size_t)(right - left + 1));
+    }
+}
+
+static void demo_draw_ball(uint8_t *framebuffer,
+                           const int center_x,
+                           const int center_y,
+                           const int size_index,
+                           const uint32_t frame) {
+    const int radius = demo_ball_radii[size_index];
+    const uint8_t *sprite = demo_ball_sprites[size_index];
+    const uint32_t color_phase = frame / DEMO_BALL_CROSSFADE_FRAMES;
+    const uint8_t first_color = (uint8_t)(color_phase % DEMO_BALL_COLOR_COUNT);
+    const uint8_t second_color =
+            (uint8_t)((first_color + 1u) % DEMO_BALL_COLOR_COUNT);
+    const uint8_t blend = (uint8_t)(frame % DEMO_BALL_CROSSFADE_FRAMES);
+
+    for (int offset_y = -radius; offset_y <= radius; ++offset_y) {
+        const int y = center_y + offset_y;
+        if (y < 0 || y >= NTSC_FRAME_HEIGHT) {
+            continue;
+        }
+
+        const uint8_t *source = &sprite[
+                (offset_y + DEMO_BALL_MAX_RADIUS) * DEMO_BALL_MAX_DIAMETER +
+                DEMO_BALL_MAX_RADIUS - radius];
+        uint8_t *destination = &framebuffer[y * NTSC_FRAME_WIDTH + center_x - radius];
+
+        for (int offset_x = -radius; offset_x <= radius; ++offset_x) {
+            const uint8_t shade = *source++;
+            if (shade != DEMO_TRANSPARENT) {
+                const uint8_t threshold = (uint8_t)(demo_bayer_4x4[
+                        ((offset_y + radius) & 3) * 4 +
+                        ((offset_x + radius) & 3)] * 2u);
+                const uint8_t color = threshold < blend ? second_color : first_color;
+                *destination = (uint8_t)(DEMO_BALL_BASE +
+                        color * DEMO_BALL_SHADES + shade);
+            }
+            ++destination;
+        }
+    }
+}
+
+static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
+    int center_x;
+    int center_y;
+    int ground_y;
+    int size_index;
+
+    demo_draw_background(framebuffer, frame);
+    demo_ball_position(frame, &center_x, &center_y, &ground_y, &size_index);
+    demo_draw_shadow(framebuffer, center_x, ground_y, size_index);
+    demo_draw_ball(framebuffer, center_x, center_y, size_index, frame);
+}
+
+static void core1_entry(void) {
+    uint32_t frame = 0;
+    uint8_t *draw_buffer = demo_backbuffer;
+    absolute_time_t next_frame = get_absolute_time();
+
+    while (true) {
+        demo_render_frame(draw_buffer, frame++);
+        ntsc_present_framebuffer(draw_buffer);
+        draw_buffer = draw_buffer == demo_backbuffer
+                      ? ntsc_framebuffer
+                      : demo_backbuffer;
+
+        next_frame = delayed_by_ms(next_frame, DEMO_FRAME_TIME_MS);
+        if (absolute_time_diff_us(get_absolute_time(), next_frame) > 0) {
+            sleep_until(next_frame);
+        } else {
+            next_frame = get_absolute_time();
+        }
+    }
+}
+
+void main(void) {
+    demo_init_palette();
+    demo_init_floor();
+    demo_init_ball();
     ntsc_init();
 
-    // Initialize wave LUT once (amp, fx, fy, t_speed)
-    init_wave_lut(8.0f, 0.09f, 0.11f, 0.12f);
-
-    // Initialize onboard LED
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 
-    // LED startup sequence
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 6; ++i) {
         sleep_ms(23);
         gpio_put(PICO_DEFAULT_LED_PIN, true);
         sleep_ms(23);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
     }
 
-    // Launch rendering on core 1
     multicore_launch_core1(core1_entry);
 
-    // Core 0 heartbeat
-    while (1) {
+    while (true) {
         gpio_put(PICO_DEFAULT_LED_PIN, true);
         sleep_ms(250);
         gpio_put(PICO_DEFAULT_LED_PIN, false);

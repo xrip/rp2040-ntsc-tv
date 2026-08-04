@@ -16,7 +16,7 @@
         "CMAKE_BUILD_TYPE": "MinSizeRel",
         "PICO_BOARD": "pico",
         "PICO_PLATFORM": "rp2040",
-        "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}",
+        "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}/picotool-2.3.0-x64-win",
         "PICO_NO_UF2": "OFF",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
@@ -32,7 +32,7 @@
         "CMAKE_BUILD_TYPE": "MinSizeRel",
         "PICO_BOARD": "pico2",
         "PICO_PLATFORM": "rp2350-arm-s",
-        "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}",
+        "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}/picotool-2.3.0-x64-win",
         "PICO_NO_UF2": "OFF",
         "PICO_NO_COPRO_DIS": "ON",
         "NTSC_LOW_RAM": "OFF",
