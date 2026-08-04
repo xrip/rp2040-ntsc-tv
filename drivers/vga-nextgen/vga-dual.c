@@ -73,22 +73,30 @@ static void vga_dual_make_templates(void) {
            blank, VGA_DUAL_LINE_SAMPLES);
 }
 
-static void vga_dual_generate_active_line(const size_t source_line) {
+#if PICO_RP2350
+static void __time_critical_func(vga_dual_generate_active_line)(
+        const size_t source_line, uint32_t *line_buffer) {
+#else
+static __force_inline void vga_dual_generate_active_line(
+        const size_t source_line, uint32_t *line_buffer) {
+#endif
     const uint8_t *source =
             vga_dual_active_framebuffer + source_line * VGA_DUAL_SOURCE_WIDTH;
-    uint16_t *output = (uint16_t *)((uint8_t *)vga_dual_line_buffer(
-            VGA_DUAL_ACTIVE_BUFFER_0 + (source_line & 1u)) +
-            VGA_DUAL_ACTIVE_OFFSET);
+    uint16_t *output = (uint16_t *)((uint8_t *)line_buffer +
+                                  VGA_DUAL_ACTIVE_OFFSET);
     uint32_t groups = VGA_DUAL_SOURCE_WIDTH / 4u;
 
+#pragma GCC unroll 4
     do {
 #if PICO_RP2350
         uint32_t pixels;
         __builtin_memcpy(&pixels, source, sizeof(pixels));
-        output[0] = vga_dual_palette[(uint8_t)pixels];
-        output[1] = vga_dual_palette[(uint8_t)(pixels >> 8)];
-        output[2] = vga_dual_palette[(uint8_t)(pixels >> 16)];
-        output[3] = vga_dual_palette[(uint8_t)(pixels >> 24)];
+        const uint32_t pixel0 = vga_dual_palette[(uint8_t)pixels];
+        const uint32_t pixel1 = vga_dual_palette[(uint8_t)(pixels >> 8)];
+        const uint32_t pixel2 = vga_dual_palette[(uint8_t)(pixels >> 16)];
+        const uint32_t pixel3 = vga_dual_palette[(uint8_t)(pixels >> 24)];
+        ((uint32_t *)output)[0] = pixel0 | pixel1 << 16;
+        ((uint32_t *)output)[1] = pixel2 | pixel3 << 16;
 #else
         output[0] = vga_dual_palette[source[0]];
         output[1] = vga_dual_palette[source[1]];
@@ -100,33 +108,41 @@ static void vga_dual_generate_active_line(const size_t source_line) {
     } while (--groups);
 }
 
-static inline uintptr_t vga_dual_prepare_line(const size_t line) {
+static inline void vga_dual_prepare_line(const size_t line) {
     if (line < VGA_DUAL_ACTIVE_LINES) {
+        if ((line & 1u) != 0u) {
+            return;
+        }
+
         const size_t source_line = line >> 1u;
-        if ((line & 1u) == 0u) {
-            const uint8_t *pending = nullptr;
-            if (line == 0u) {
-                pending = vga_dual_pending_framebuffer;
-                if (pending != nullptr) {
-                    __mem_fence_acquire();
-                    vga_dual_active_framebuffer = pending;
-                }
-            }
-            vga_dual_generate_active_line(source_line);
+        const uint8_t *pending = nullptr;
+        if (line == 0u) {
+            pending = vga_dual_pending_framebuffer;
             if (pending != nullptr) {
-                __mem_fence_release();
-                vga_dual_pending_framebuffer = nullptr;
+                __mem_fence_acquire();
+                vga_dual_active_framebuffer = pending;
             }
         }
-        return (uintptr_t)vga_dual_line_buffer(
-                VGA_DUAL_ACTIVE_BUFFER_0 + (source_line & 1u));
+        uint32_t *line_buffer = (source_line & 1u) != 0u
+                                ? vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_1)
+                                : vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_0);
+        vga_dual_generate_active_line(source_line, line_buffer);
+        if (pending != nullptr) {
+            __mem_fence_release();
+            vga_dual_pending_framebuffer = nullptr;
+        }
+        vga_dual_next_line_address = (uintptr_t)line_buffer;
+        return;
     }
 
     if (line >= VGA_DUAL_VSYNC_FIRST_LINE &&
         line < VGA_DUAL_VSYNC_FIRST_LINE + VGA_DUAL_VSYNC_LINES) {
-        return (uintptr_t)vga_dual_line_buffer(VGA_DUAL_VSYNC_BUFFER);
+        vga_dual_next_line_address =
+                (uintptr_t)vga_dual_line_buffer(VGA_DUAL_VSYNC_BUFFER);
+        return;
     }
-    return (uintptr_t)vga_dual_line_buffer(VGA_DUAL_BLANK_BUFFER);
+    vga_dual_next_line_address =
+            (uintptr_t)vga_dual_line_buffer(VGA_DUAL_BLANK_BUFFER);
 }
 
 static void __time_critical_func(vga_dual_dma_handler)(void) {
@@ -141,7 +157,7 @@ static void __time_critical_func(vga_dual_dma_handler)(void) {
     if (following_line == VGA_DUAL_TOTAL_LINES) {
         following_line = 0;
     }
-    vga_dual_next_line_address = vga_dual_prepare_line(following_line);
+    vga_dual_prepare_line(following_line);
 }
 
 void vga_dual_set_palette(const uint8_t index, const uint32_t color888) {
@@ -171,7 +187,8 @@ void vga_dual_init(const uint8_t *framebuffer) {
     vga_dual_active_framebuffer = framebuffer;
     vga_dual_pending_framebuffer = nullptr;
     vga_dual_make_templates();
-    vga_dual_generate_active_line(0);
+    vga_dual_generate_active_line(
+            0, vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_0));
     vga_dual_next_line_address = (uintptr_t)vga_dual_line_buffer(
             VGA_DUAL_ACTIVE_BUFFER_0);
 

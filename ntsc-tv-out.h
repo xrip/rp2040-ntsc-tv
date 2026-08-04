@@ -154,6 +154,11 @@ static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t 
         // Process all pixels in the scanline
 #if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
         // Compact palette: unpack four pixels per iteration.
+#if PICO_RP2350
+#pragma GCC unroll 2
+#else
+#pragma GCC unroll 4
+#endif
         do {
 #if PICO_RP2350
             uint32_t source_pixels;
@@ -173,6 +178,11 @@ static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t 
         } while (--pixel_groups);
 #else
         // Packed palette: process four pixels per iteration.
+#if PICO_RP2350
+#pragma GCC unroll 2
+#else
+#pragma GCC unroll 4
+#endif
         do {
 #if PICO_RP2350
             uint32_t source_pixels;
