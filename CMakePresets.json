@@ -39,23 +39,5 @@
         "NTSC_USE_SCRATCH_Y": "OFF"
       }
     }
-  ],
-  "buildPresets": [
-    {
-      "name": "rp2040",
-      "displayName": "Build RP2040",
-      "configurePreset": "rp2040",
-      "targets": [
-        "ntsc-tv"
-      ]
-    },
-    {
-      "name": "rp2350",
-      "displayName": "Build RP2350",
-      "configurePreset": "rp2350",
-      "targets": [
-        "ntsc-tv"
-      ]
-    }
   ]
 }
