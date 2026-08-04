@@ -46,7 +46,10 @@ caused by using this program.
 #define NTSC_VSYNC_LINES       10    // Vertical sync pulse lines
 #define NTSC_VBLANK_TOP        12    // Top blanking interval lines
 #define NTSC_HSYNC_WIDTH       68    // Horizontal sync width in samples (~4.7μs)
-#define NTSC_ACTIVE_START      (NTSC_HSYNC_WIDTH + 8 + 9 * 4 + 60)  // Start of active video
+#define NTSC_BACK_PORCH_SAMPLES 8
+#define NTSC_COLOR_BURST_CYCLES 9
+#define NTSC_ACTIVE_START      (NTSC_HSYNC_WIDTH + NTSC_BACK_PORCH_SAMPLES + \
+                                NTSC_COLOR_BURST_CYCLES * 4 + 60)
 
 // NTSC composite video signal levels (0-7 range for 3-bit PWM)
 #define NTSC_LEVEL_SYNC          0    // Sync pulse level (lowest)
@@ -211,16 +214,16 @@ static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t 
             *buffer_ptr++ = NTSC_LEVEL_SYNC;
 
         // Back porch before color burst
-        for (int j = 0; j < 8; j++)
+        for (int j = 0; j < NTSC_BACK_PORCH_SAMPLES; j++)
             *buffer_ptr++ = NTSC_LEVEL_BLANK;
 
-        // Color burst signal - 9 cycles at 3.579545 MHz
+        // Color burst signal at 3.579545 MHz
         // Alternates between levels to create a reference signal for color decoding
-        for (int j = 0; j < 9; j++) {
-            *buffer_ptr++ = 2; // Phase 0°
-            *buffer_ptr++ = 1; // Phase 90°
-            *buffer_ptr++ = 2; // Phase 180°
-            *buffer_ptr++ = 3; // Phase 270°
+        for (int j = 0; j < NTSC_COLOR_BURST_CYCLES; j++) {
+            *buffer_ptr++ = NTSC_LEVEL_BLANK;      // Phase 0°
+            *buffer_ptr++ = NTSC_LEVEL_BURST_LOW;  // Phase 90°
+            *buffer_ptr++ = NTSC_LEVEL_BLANK;      // Phase 180°
+            *buffer_ptr++ = NTSC_LEVEL_BURST_HIGH; // Phase 270°
         }
 
         // Fill remainder with blanking level
