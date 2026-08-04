@@ -1,3 +1,5 @@
 /bin
 /cmake-build-release
+/cmake-build-rp2040
+/cmake-build-rp2350
 /.idea

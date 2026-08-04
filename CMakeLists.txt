@@ -21,6 +21,16 @@ add_link_options(-flto -fwhole-program)
 
 add_executable(${PROJECT_NAME})
 
+option(NTSC_LOW_RAM "Use compact NTSC palette tables" OFF)
+if (NTSC_LOW_RAM)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NTSC_LOW_RAM=1)
+endif()
+
+option(NTSC_USE_SCRATCH_Y "Place NTSC palette tables in scratch Y" OFF)
+if (NTSC_USE_SCRATCH_Y)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NTSC_USE_SCRATCH_Y=1)
+endif()
+
 pico_define_boot_stage2(slower_boot ${PICO_DEFAULT_BOOT_STAGE2_FILE})
 target_compile_definitions(slower_boot PRIVATE PICO_FLASH_SPI_CLKDIV=4)
 pico_set_boot_stage2(${PROJECT_NAME} slower_boot)

@@ -4,7 +4,6 @@
 
 #include <hardware/gpio.h>
 #include <hardware/clocks.h>
-#include <hardware/structs/vreg_and_chip_reset.h>
 #include "ntsc-tv-out.h"
 
 // ------------------------------------------------------------

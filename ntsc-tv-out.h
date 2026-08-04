@@ -1,5 +1,5 @@
 /*----------------------------------------------------------------------------
-Copyright (C) 2025, xrip, all right reserved.
+Copyright (C) 2026, xrip, all right reserved.
 Copyright (C) 2024, KenKen, all right reserved.
 
 This program supplied herewith by KenKen is free software; you can
@@ -22,7 +22,10 @@ caused by using this program.
 #ifndef RP2040_PWM_NTSC_H
 #define RP2040_PWM_NTSC_H
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
 #pragma GCC optimize ("O3")
+#endif
 
 #include <hardware/dma.h>
 #include <hardware/pwm.h>
@@ -40,7 +43,7 @@ caused by using this program.
 #define NTSC_SAMPLES_PER_LINE  908   // 227 * 4 samples per scanline
 #define NTSC_TOTAL_LINES       262   // Total scanlines in NTSC frame
 #define NTSC_VSYNC_LINES       10    // Vertical sync pulse lines
-#define NTSC_VBLANK_TOP        26    // Top blanking interval lines
+#define NTSC_VBLANK_TOP        12    // Top blanking interval lines
 #define NTSC_HSYNC_WIDTH       68    // Horizontal sync width in samples (~4.7μs)
 #define NTSC_ACTIVE_START      (NTSC_HSYNC_WIDTH + 8 + 9 * 4 + 60)  // Start of active video
 
@@ -64,16 +67,6 @@ caused by using this program.
 // Aligned to the 4-byte boundary for efficient DMA transfers
 static uint8_t ntsc_framebuffer[NTSC_FRAME_WIDTH * NTSC_FRAME_HEIGHT] __attribute__ ((aligned (4)));
 
-#if !NDEBUG
-// Flag indicating active video region processing
-//  1: Currently generating visible scanlines
-//  0: In a vertical blanking interval
-static volatile uint8_t ntsc_is_rendering_active;
-
-// Frame counter - increments after each complete frame
-// Application code should reset this to track frame timing
-static volatile uint16_t ntsc_frame_counter = 0;
-#endif
 // Ping-pong buffers for DMA double-buffering
 // While one buffer is being transmitted, the other is prepared
 // Size aligned to the 4-byte boundary for DMA efficiency
@@ -82,23 +75,108 @@ static uint16_t ntsc_scanline_buffers[2][NTSC_SAMPLES_PER_LINE + 3 & ~3u] __attr
 // NTSC color palette lookup table
 // Each color has 4 entries for the 4 phases of NTSC color subcarrier (0°, 90°, 180°, 270°)
 // This allows proper color encoding at 3.579545 MHz
-static uint16_t ntsc_palette[4 * 256] __attribute__ ((aligned (4)));
+#if defined(NTSC_USE_SCRATCH_Y) && NTSC_USE_SCRATCH_Y
+#define NTSC_PALETTE_PLACEMENT(name) __scratch_y(name)
+#else
+#define NTSC_PALETTE_PLACEMENT(name)
+#endif
 
-// DMA channel handles for ping-pong operation
-static uint ntsc_dma_chan_primary, ntsc_dma_chan_secondary;
+#if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
+// Compact palette: two 4-bit phase values packed per byte (512 bytes total)
+// PWM compare values 0..11 fit in a nibble; phases 0°,90° in _even, 180°,270° in _odd
+static uint8_t NTSC_PALETTE_PLACEMENT("ntsc_palette_even") ntsc_palette_even[256];
+static uint8_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256];
+#else
+// Packed palette: two 16-bit phase values per uint32_t (2048 bytes total)
+// phases 0°,90° in _even, 180°,270° in _odd
+static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_even") ntsc_palette_even[256] __attribute__ ((aligned (4)));
+static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256]  __attribute__ ((aligned (4)));
+#endif
+
+#undef NTSC_PALETTE_PLACEMENT
+
+// The data channel sends a scanline. The control channel selects the next buffer.
+static uint8_t ntsc_dma_chan_data;
+static uintptr_t ntsc_dma_read_addresses[2] __attribute__ ((aligned (8)));
+
+#if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
+// Unpack a byte holding two 4-bit phase values into a 32-bit value
+// suitable for a single 32-bit write to the scanline buffer
+static inline uint32_t ntsc_unpack_pair(uint32_t pair) {
+    return (pair * 0x1001u) & 0x000f000fu;
+}
+#endif
 
 /* ===========================================================================
  * Function: ntsc_generate_scanline
  * Purpose: Generate NTSC composite video signal data for one scanline
  * =========================================================================== */
 static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t scanline_number) {
-    // Static pointer maintains position between function calls
-    static uint8_t *current_pixel_ptr = ntsc_framebuffer;
-
     uint16_t *buffer_ptr = output_buffer;
+    const size_t active_line = scanline_number - (NTSC_VSYNC_LINES + NTSC_VBLANK_TOP);
 
+    // Generate active video scanlines
+    if (active_line < NTSC_FRAME_HEIGHT) {
+        // Skip horizontal blanking interval
+        buffer_ptr += NTSC_ACTIVE_START;
+
+        const uint8_t *pixel_ptr = ntsc_framebuffer + active_line * NTSC_FRAME_WIDTH;
+        uint32_t *output_ptr = (uint32_t *)buffer_ptr;
+#if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM && PICO_RP2040
+        uint32_t pixel_groups = NTSC_FRAME_WIDTH / 2;
+#else
+        uint32_t pixel_groups = NTSC_FRAME_WIDTH / 4;
+#endif
+
+        // Process all pixels in the scanline
+#if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
+        // Compact palette: unpack four pixels per iteration.
+        do {
+#if PICO_RP2350
+            uint32_t source_pixels;
+            __builtin_memcpy(&source_pixels, pixel_ptr, sizeof(source_pixels));
+            output_ptr[0] = ntsc_unpack_pair(ntsc_palette_even[(uint8_t)source_pixels]);
+            output_ptr[1] = ntsc_unpack_pair(ntsc_palette_odd[(uint8_t)(source_pixels >> 8)]);
+            output_ptr[2] = ntsc_unpack_pair(ntsc_palette_even[(uint8_t)(source_pixels >> 16)]);
+            output_ptr[3] = ntsc_unpack_pair(ntsc_palette_odd[source_pixels >> 24]);
+            pixel_ptr += 4;
+            output_ptr += 4;
+#else
+            output_ptr[0] = ntsc_unpack_pair(ntsc_palette_even[pixel_ptr[0]]);
+            output_ptr[1] = ntsc_unpack_pair(ntsc_palette_odd[pixel_ptr[1]]);
+            pixel_ptr += 2;
+            output_ptr += 2;
+#endif
+        } while (--pixel_groups);
+#else
+        // Packed palette: process four pixels per iteration.
+        do {
+#if PICO_RP2350
+            uint32_t source_pixels;
+            __builtin_memcpy(&source_pixels, pixel_ptr, sizeof(source_pixels));
+
+            const uint32_t pixel0 = ntsc_palette_even[(uint8_t)source_pixels];
+            const uint32_t pixel1 = ntsc_palette_odd[(uint8_t)(source_pixels >> 8)];
+            output_ptr[0] = pixel0;
+            output_ptr[1] = pixel1;
+
+            const uint32_t pixel2 = ntsc_palette_even[(uint8_t)(source_pixels >> 16)];
+            const uint32_t pixel3 = ntsc_palette_odd[source_pixels >> 24];
+            output_ptr[2] = pixel2;
+            output_ptr[3] = pixel3;
+#else
+            output_ptr[0] = ntsc_palette_even[pixel_ptr[0]];
+            output_ptr[1] = ntsc_palette_odd[pixel_ptr[1]];
+            output_ptr[2] = ntsc_palette_even[pixel_ptr[2]];
+            output_ptr[3] = ntsc_palette_odd[pixel_ptr[3]];
+#endif
+            pixel_ptr += 4;
+            output_ptr += 4;
+        } while (--pixel_groups);
+#endif
+    }
     // Generate equalizing pulses for the first two scanlines
-    if (scanline_number < 2) {
+    else if (scanline_number < 2) {
         // Fill most of the line with sync level (black)
         for (int j = 0; j < NTSC_SAMPLES_PER_LINE - NTSC_HSYNC_WIDTH; j++)
             *buffer_ptr++ = NTSC_LEVEL_SYNC;
@@ -130,43 +208,9 @@ static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t 
         while (buffer_ptr < output_buffer + NTSC_SAMPLES_PER_LINE)
             *buffer_ptr++ = NTSC_LEVEL_BLANK;
     }
-    // Generate active video scanlines
-    else if (scanline_number >= NTSC_VSYNC_LINES + NTSC_VBLANK_TOP &&
-             scanline_number < NTSC_VSYNC_LINES + NTSC_VBLANK_TOP + NTSC_FRAME_HEIGHT) {
-        // Skip horizontal blanking interval
-        buffer_ptr += NTSC_ACTIVE_START;
-
-        // Reset framebuffer pointer at start of first visible scanline
-        if (scanline_number == NTSC_VSYNC_LINES + NTSC_VBLANK_TOP) {
-            current_pixel_ptr = ntsc_framebuffer;
-#if !NDEBUG
-            ntsc_is_rendering_active = 1;
-#endif
-        }
-
-        // Process all pixels in the scanline
-        for (int pixel_index = 0; pixel_index < NTSC_FRAME_WIDTH; pixel_index++) {
-            // Read one graphics pixel
-            const uint8_t pixel_color = *current_pixel_ptr++;
-
-            // Write 4 NTSC phase values for this pixel
-            // Using 32-bit writes for efficiency (2 phase values at once)
-            // Phase offset alternates: 0,2,0,2... for proper color encoding
-            const uint32_t phase_offset = pixel_index & 1 ? 2 : 0;
-            *(uint32_t *) buffer_ptr = *(uint32_t *) (ntsc_palette + pixel_color * 4 + phase_offset);
-            buffer_ptr += 2;
-        }
-    }
     // Generate vertical blanking lines after active video
     else if (scanline_number == NTSC_VSYNC_LINES + NTSC_VBLANK_TOP + NTSC_FRAME_HEIGHT ||
              scanline_number == NTSC_VSYNC_LINES + NTSC_VBLANK_TOP + NTSC_FRAME_HEIGHT + 1) {
-#if !NDEBUG
-        // Mark end of active video on first blanking line
-        if (scanline_number == NTSC_VSYNC_LINES + NTSC_VBLANK_TOP + NTSC_FRAME_HEIGHT) {
-            ntsc_is_rendering_active = 0;
-            ntsc_frame_counter++;
-        }
-#endif
         // Skip horizontal blanking interval
         buffer_ptr += NTSC_ACTIVE_START;
 
@@ -200,22 +244,31 @@ static void ntsc_set_color(const uint8_t palette_index, const uint8_t blue, cons
     const int32_t red_chroma_90 = (red - luminance) * -786; // (R-Y) * 0.8773 * scale
 
     // Generate composite signal values for each subcarrier phase
-
     // Phase 0°: Y + chroma
-    int32_t composite_signal = (luminance * 1792 + blue_chroma_0 + red_chroma_0 + 2 * 65536 + 32768) / 65536;
-    ntsc_palette[palette_index * 4] = composite_signal < 0 ? 0 : composite_signal;
-
+    const int32_t phase0 = (luminance * 1792 + blue_chroma_0 + red_chroma_0 + 2 * 65536 + 32768) / 65536;
     // Phase 90°: Y + chroma(90°)
-    composite_signal = (luminance * 1792 + blue_chroma_90 + red_chroma_90 + 2 * 65536 + 32768) / 65536;
-    ntsc_palette[palette_index * 4 + 1] = composite_signal < 0 ? 0 : composite_signal;
-
+    const int32_t phase1 = (luminance * 1792 + blue_chroma_90 + red_chroma_90 + 2 * 65536 + 32768) / 65536;
     // Phase 180°: Y - chroma
-    composite_signal = (luminance * 1792 - blue_chroma_0 - red_chroma_0 + 2 * 65536 + 32768) / 65536;
-    ntsc_palette[palette_index * 4 + 2] = composite_signal < 0 ? 0 : composite_signal;
-
+    const int32_t phase2 = (luminance * 1792 - blue_chroma_0 - red_chroma_0 + 2 * 65536 + 32768) / 65536;
     // Phase 270°: Y - chroma(90°)
-    composite_signal = (luminance * 1792 - blue_chroma_90 - red_chroma_90 + 2 * 65536 + 32768) / 65536;
-    ntsc_palette[palette_index * 4 + 3] = composite_signal < 0 ? 0 : composite_signal;
+    const int32_t phase3 = (luminance * 1792 - blue_chroma_90 - red_chroma_90 + 2 * 65536 + 32768) / 65536;
+
+#if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
+    // Pack as nibble pairs. The current conversion produces values in the
+    // 0..11 range; PWM compare values >= TOP + 1 naturally produce 100% duty.
+    ntsc_palette_even[palette_index] =
+        (uint8_t)(phase0 < 0 ? 0 : phase0) |
+        ((uint8_t)(phase1 < 0 ? 0 : phase1) << 4);
+    ntsc_palette_odd[palette_index] =
+        (uint8_t)(phase2 < 0 ? 0 : phase2) |
+        ((uint8_t)(phase3 < 0 ? 0 : phase3) << 4);
+#else
+    // Pack as 16-bit pairs in uint32_t tables
+    ntsc_palette_even[palette_index] =
+        (uint32_t)(phase0 < 0 ? 0 : phase0) | ((uint32_t)(phase1 < 0 ? 0 : phase1) << 16);
+    ntsc_palette_odd[palette_index] =
+        (uint32_t)(phase2 < 0 ? 0 : phase2) | ((uint32_t)(phase3 < 0 ? 0 : phase3) << 16);
+#endif
 }
 
 /* ===========================================================================
@@ -223,24 +276,16 @@ static void ntsc_set_color(const uint8_t palette_index, const uint8_t blue, cons
  * Purpose: Handle DMA transfer completion and prepare next scanline
  * =========================================================================== */
 static void __time_critical_func(ntsc_dma_irq_handler)() {
-    static size_t current_scanline = 0;
-    // Read and clear DMA interrupt flags
-    const volatile uint32_t interrupt_flags = dma_hw->ints0;
-    dma_hw->ints0 = interrupt_flags;
+    static size_t current_scanline = 2;
+    dma_hw->ints0 = 1u << ntsc_dma_chan_data;
 
-    const uint8_t scanline_buffer_index = interrupt_flags & (1u << ntsc_dma_chan_secondary) ? 1 : 0;
-    // Determine which channel completed and prepare its buffer
-    ntsc_generate_scanline(ntsc_scanline_buffers[scanline_buffer_index], current_scanline);
-    if (scanline_buffer_index) {
-        dma_channel_set_read_addr(ntsc_dma_chan_secondary, ntsc_scanline_buffers[scanline_buffer_index], false);
-    } else {
-        dma_channel_set_read_addr(ntsc_dma_chan_primary, ntsc_scanline_buffers[scanline_buffer_index], false);
-    }
-
-    // Advance to the next scanline with wraparound
+    const size_t scanline = current_scanline;
+    uint16_t *output_buffer = ntsc_scanline_buffers[scanline & 1u];
     if (++current_scanline >= NTSC_TOTAL_LINES) {
         current_scanline = 0;
     }
+
+    ntsc_generate_scanline(output_buffer, scanline);
 }
 
 
@@ -277,41 +322,48 @@ static inline void ntsc_init() {
     // Offset by 2 bytes to write to the upper 16 bits (channel B)
     pwm_compare_addr = (volatile void *) ((uintptr_t) pwm_compare_addr + 2);
 
-    // Allocate DMA channels for ping-pong operation
-    ntsc_dma_chan_primary = dma_claim_unused_channel(true);
-    ntsc_dma_chan_secondary = dma_claim_unused_channel(true);
+    // Allocate one paced data channel and one one-word control channel.
+    ntsc_dma_chan_data = dma_claim_unused_channel(true);
+    const uint dma_chan_control = dma_claim_unused_channel(true);
 
-    // Configure primary DMA channel
-    dma_channel_config primary_config = dma_channel_get_default_config(ntsc_dma_chan_primary);
-    channel_config_set_transfer_data_size(&primary_config, DMA_SIZE_16);
-    channel_config_set_read_increment(&primary_config, true); // Increment source
-    channel_config_set_write_increment(&primary_config, false); // Fixed destination
-    channel_config_set_dreq(&primary_config, DREQ_PWM_WRAP0 + pwm_slice);
-    channel_config_set_chain_to(&primary_config, ntsc_dma_chan_secondary); // Chain to secondary
+    // The control channel reads these in a ring. The first completed transfer
+    // changes the data source from buffer 0 to buffer 1.
+    ntsc_dma_read_addresses[0] = (uintptr_t)ntsc_scanline_buffers[1];
+    ntsc_dma_read_addresses[1] = (uintptr_t)ntsc_scanline_buffers[0];
+
+    dma_channel_config data_config = dma_channel_get_default_config(ntsc_dma_chan_data);
+    channel_config_set_transfer_data_size(&data_config, DMA_SIZE_16);
+    channel_config_set_read_increment(&data_config, true);
+    channel_config_set_write_increment(&data_config, false);
+    channel_config_set_dreq(&data_config, DREQ_PWM_WRAP0 + pwm_slice);
+    channel_config_set_chain_to(&data_config, dma_chan_control);
 
     dma_channel_configure(
-        ntsc_dma_chan_primary,
-        &primary_config,
+        ntsc_dma_chan_data,
+        &data_config,
         pwm_compare_addr, // Destination: PWM register
         ntsc_scanline_buffers[0], // Source: Buffer 0
         NTSC_SAMPLES_PER_LINE, // Transfer count
         false // Don't start yet
     );
 
-    // Configure a secondary DMA channel (mirrors primary, chains back)
-    dma_channel_config secondary_config = dma_channel_get_default_config(ntsc_dma_chan_secondary);
-    channel_config_set_transfer_data_size(&secondary_config, DMA_SIZE_16);
-    channel_config_set_read_increment(&secondary_config, true);
-    channel_config_set_write_increment(&secondary_config, false);
-    channel_config_set_dreq(&secondary_config, DREQ_PWM_WRAP0 + pwm_slice);
-    channel_config_set_chain_to(&secondary_config, ntsc_dma_chan_primary); // Chain back
+    // RP2350 self-trigger cannot be used here: it would restart before the
+    // next scanline address is loaded. This one-word transfer loads READ_ADDR,
+    // then chains to the data channel. The 8-byte read ring alternates buffers.
+    dma_channel_config control_config = dma_channel_get_default_config(dma_chan_control);
+    channel_config_set_transfer_data_size(&control_config, DMA_SIZE_32);
+    channel_config_set_read_increment(&control_config, true);
+    channel_config_set_write_increment(&control_config, false);
+    channel_config_set_ring(&control_config, false, 3);
+    channel_config_set_dreq(&control_config, DREQ_FORCE);
+    channel_config_set_chain_to(&control_config, ntsc_dma_chan_data);
 
     dma_channel_configure(
-        ntsc_dma_chan_secondary,
-        &secondary_config,
-        pwm_compare_addr, // Destination: PWM register
-        ntsc_scanline_buffers[1], // Source: Buffer 1
-        NTSC_SAMPLES_PER_LINE, // Transfer count
+        dma_chan_control,
+        &control_config,
+        &dma_hw->ch[ntsc_dma_chan_data].read_addr,
+        ntsc_dma_read_addresses,
+        1,
         false // Don't start yet
     );
 
@@ -319,14 +371,18 @@ static inline void ntsc_init() {
     ntsc_generate_scanline(ntsc_scanline_buffers[0], 0);
     ntsc_generate_scanline(ntsc_scanline_buffers[1], 1);
 
-    // Enable DMA completion interrupts for both channels
-    dma_set_irq0_channel_mask_enabled(1u << ntsc_dma_chan_primary | 1u << ntsc_dma_chan_secondary,true);
+    // Only completed scanline transfers need an interrupt.
+    dma_set_irq0_channel_mask_enabled(1u << ntsc_dma_chan_data, true);
 
     // Install and enable interrupt handler
     irq_set_exclusive_handler(DMA_IRQ_0, ntsc_dma_irq_handler);
     irq_set_enabled(DMA_IRQ_0, true);
 
     // Start video generation by triggering the first DMA transfer
-    dma_start_channel_mask(1u << ntsc_dma_chan_primary);
+    dma_start_channel_mask(1u << ntsc_dma_chan_data);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
+
 #endif // RP2040_PWM_NTSC_H
