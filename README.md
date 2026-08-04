@@ -14,7 +14,7 @@ GPIO27 -- 75 ohm --- Video Out
 
 ## Project Overview
 
-This project demonstrates the use of the Pico's PWM and DMA peripherals to create a stable, color video output with minimal CPU intervention. The main application draws a scrolling, wavy black-and-white perspective checkerboard and a shaded ball that bounces across the floor while crossfading through six color ramps in a classic DOS demoscene style.
+This project demonstrates the use of the Pico's PWM and DMA peripherals to create a stable, color video output with minimal CPU intervention. The main application cycles a bouncing ball, a rotating torus, and a rotating 3D helix over a scrolling, wavy black-and-white perspective checkerboard. All three scenes crossfade through six color ramps in a classic DOS demoscene style.
 
 The core of the project lies in `ntsc-tv-out.h`, which handles the low-level NTSC signal generation, and `ntsc-tv.c`, which provides the video content to be displayed.
 
