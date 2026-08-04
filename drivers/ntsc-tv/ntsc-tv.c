@@ -19,13 +19,14 @@ caused by using this program.
 // This signal generation program (using PWM and DMA) is the idea of @lovyan03.
 // https://github.com/lovyan03/
 
-#ifndef RP2040_PWM_NTSC_H
-#define RP2040_PWM_NTSC_H
-
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
 #endif
+
+#include "ntsc-tv.h"
+
+#include <stddef.h>
 
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
@@ -63,19 +64,10 @@ caused by using this program.
  * Hardware Pin Configuration
  * =========================================================================== */
 
-// Pin for NTSC composite video signal output via PWM
-#ifndef NTSC_PIN_OUTPUT
-#define NTSC_PIN_OUTPUT 27
-#endif
-
-// Graphics framebuffer - stores raw pixel data for the display
-// Aligned to the 4-byte boundary for efficient DMA transfers
-static uint8_t ntsc_framebuffer[NTSC_FRAME_WIDTH * NTSC_FRAME_HEIGHT] __attribute__ ((aligned (4)));
-
 // Scanout reads only the active buffer. A producer may prepare another
 // framebuffer and request an atomic swap at the start of the next frame.
-static const uint8_t *ntsc_active_framebuffer = ntsc_framebuffer;
-static const uint8_t *volatile ntsc_pending_framebuffer = nullptr;
+static const uint8_t *ntsc_active_framebuffer;
+static const uint8_t *volatile ntsc_pending_framebuffer;
 
 // Ping-pong buffers for DMA double-buffering
 // While one buffer is being transmitted, the other is prepared
@@ -105,13 +97,15 @@ static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256]
 
 #undef NTSC_PALETTE_PLACEMENT
 
-static inline void ntsc_present_framebuffer(const uint8_t *framebuffer) {
+void ntsc_tv_request_framebuffer(const uint8_t *framebuffer) {
     // Publish all completed pixel writes before the IRQ sees the pointer.
     __mem_fence_release();
     ntsc_pending_framebuffer = framebuffer;
+}
 
+void ntsc_tv_wait_framebuffer(void) {
     // The IRQ clears this only after switching buffers at a frame boundary.
-    while (ntsc_pending_framebuffer != nullptr) {
+    while (ntsc_pending_framebuffer != NULL) {
         tight_loop_contents();
     }
     __mem_fence_acquire();
@@ -304,6 +298,18 @@ static void ntsc_set_color(const uint8_t palette_index, const uint8_t blue, cons
 #endif
 }
 
+void ntsc_tv_set_palette(const uint8_t index, const uint32_t color888) {
+    const uint8_t red = (uint8_t)(color888 >> 16);
+    const uint8_t green = (uint8_t)(color888 >> 8);
+    const uint8_t blue = (uint8_t)color888;
+
+    ntsc_set_color(index, blue, red, green);
+}
+
+void ntsc_tv_set_framebuffer(const uint8_t *framebuffer) {
+    ntsc_active_framebuffer = framebuffer;
+}
+
 /* ===========================================================================
  * Function: ntsc_dma_irq_handler
  * Purpose: Handle DMA transfer completion and prepare next scanline
@@ -317,11 +323,11 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
 
     if (scanline == 0) {
         const uint8_t *pending_framebuffer = ntsc_pending_framebuffer;
-        if (pending_framebuffer != nullptr) {
+        if (pending_framebuffer != NULL) {
             __mem_fence_acquire();
             ntsc_active_framebuffer = pending_framebuffer;
             __mem_fence_release();
-            ntsc_pending_framebuffer = nullptr;
+            ntsc_pending_framebuffer = NULL;
         }
     }
 
@@ -334,11 +340,14 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
 
 
 /* ===========================================================================
- * Function: ntsc_init
+ * Function: ntsc_tv_init
  * Purpose: Initialize the complete NTSC video generation system
  * =========================================================================== */
-static inline void ntsc_init() {
-    constexpr uint32_t pwm_period_cycles = 11;
+void ntsc_tv_init(const uint8_t *framebuffer) {
+    const uint32_t pwm_period_cycles = 11;
+
+    ntsc_active_framebuffer = framebuffer;
+    ntsc_pending_framebuffer = NULL;
 
     // Configure PWM output pin
     gpio_set_function(NTSC_PIN_OUTPUT, GPIO_FUNC_PWM);
@@ -413,11 +422,9 @@ static inline void ntsc_init() {
     irq_set_enabled(DMA_IRQ_0, true);
 }
 
-static inline uint32_t ntsc_start_mask(void) {
+uint32_t ntsc_tv_start_mask(void) {
     return 1u << ntsc_dma_chan_data;
 }
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
-
-#endif // RP2040_PWM_NTSC_H

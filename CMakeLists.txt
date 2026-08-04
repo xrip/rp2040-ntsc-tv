@@ -16,8 +16,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 pico_sdk_init()
 
-option(GRAPHICS_DUAL_OUTPUT "Enable synchronized VGA and NTSC output" ON)
-add_subdirectory(drivers/vga-nextgen)
+option(VGA "Enable VGA output" ON)
+option(NTSC_TV "Enable NTSC composite output" ON)
+
+if (NOT VGA AND NOT NTSC_TV)
+    message(FATAL_ERROR "Enable at least one video output: VGA or NTSC_TV")
+endif()
+
+if (VGA)
+    add_subdirectory(drivers/vga-nextgen)
+endif()
+if (NTSC_TV)
+    add_subdirectory(drivers/ntsc-tv)
+endif()
 add_subdirectory(drivers/graphics)
 
 #add_compile_options(-ffunction-sections -fdata-sections -fms-extensions -O3)
@@ -25,16 +36,6 @@ add_compile_options(-flto -fwhole-program -ffunction-sections -fdata-sections -f
 add_link_options(-flto -fwhole-program)
 
 add_executable(${PROJECT_NAME})
-
-option(NTSC_LOW_RAM "Use compact NTSC palette tables" OFF)
-if (NTSC_LOW_RAM)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NTSC_LOW_RAM=1)
-endif()
-
-option(NTSC_USE_SCRATCH_Y "Place NTSC palette tables in scratch Y" OFF)
-if (NTSC_USE_SCRATCH_Y)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NTSC_USE_SCRATCH_Y=1)
-endif()
 
 pico_define_boot_stage2(slower_boot ${PICO_DEFAULT_BOOT_STAGE2_FILE})
 target_compile_definitions(slower_boot PRIVATE PICO_FLASH_SPI_CLKDIV=4)
@@ -61,4 +62,12 @@ target_link_libraries(${PROJECT_NAME}
 
         -Wl,--wrap=atexit # size optimizations
 )
+
+if (VGA)
+    target_link_libraries(${PROJECT_NAME} vga-nextgen)
+endif()
+if (NTSC_TV)
+    target_link_libraries(${PROJECT_NAME} ntsc-tv-driver)
+endif()
+
 target_link_options(${PROJECT_NAME} PRIVATE -Xlinker --print-memory-usage --data-sections --function-sections)

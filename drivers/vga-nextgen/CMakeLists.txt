@@ -1,15 +1,11 @@
 add_library(vga-nextgen INTERFACE)
 
-if (GRAPHICS_DUAL_OUTPUT)
-    target_sources(vga-nextgen INTERFACE
-            ${CMAKE_CURRENT_LIST_DIR}/vga-dual.c
-    )
-    target_compile_definitions(vga-nextgen INTERFACE GRAPHICS_DUAL_OUTPUT=1)
-else()
-    target_sources(vga-nextgen INTERFACE
-            ${CMAKE_CURRENT_LIST_DIR}/vga.c
-    )
-endif()
+target_sources(vga-nextgen INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/vga.c
+        ${CMAKE_CURRENT_LIST_DIR}/graphics.c
+)
+
+target_compile_definitions(vga-nextgen INTERFACE VGA=1)
 
 target_link_libraries(vga-nextgen INTERFACE
         hardware_pio

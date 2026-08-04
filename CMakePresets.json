@@ -18,6 +18,8 @@
         "PICO_PLATFORM": "rp2040",
         "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}/picotool-2.3.0-x64-win",
         "PICO_NO_UF2": "OFF",
+        "VGA": "ON",
+        "NTSC_TV": "ON",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
       }
@@ -35,6 +37,8 @@
         "PICOTOOL_FETCH_FROM_GIT_PATH": "$env{TEMP}/picotool-2.3.0-x64-win",
         "PICO_NO_UF2": "OFF",
         "PICO_NO_COPRO_DIS": "ON",
+        "VGA": "ON",
+        "NTSC_TV": "ON",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
       }

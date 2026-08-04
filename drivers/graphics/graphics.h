@@ -20,6 +20,9 @@ extern "C" {
 #ifdef VGA
 #include "vga.h"
 #endif
+#ifdef NTSC_TV
+#include "ntsc-tv.h"
+#endif
 #ifdef TV
 #include "tv.h"
 #endif

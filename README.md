@@ -69,8 +69,8 @@ This is the application and demo layer. It:
 
 The renderer uses two full framebuffers:
 
-- `ntsc_framebuffer`, owned by the NTSC module and returned by
-  `graphics_get_framebuffer()`;
+- the primary framebuffer, owned by the selected graphics adapter and returned
+  by `graphics_get_framebuffer()`;
 - `demo_backbuffer`, owned by the demo.
 
 No full-frame copy is made during presentation. Only framebuffer pointers are
@@ -78,21 +78,24 @@ changed.
 
 ### `drivers/graphics`
 
-This is the common API layer. In the current dual build it owns these actions:
+This folder has the common public `graphics.h` interface, fonts, and text/window
+drawing helpers. The selected output module supplies the `graphics_*` display
+functions.
 
-- `graphics_init()` sets the voltage and the 315 MHz system clock, starts both
-  output drivers, starts both data DMA channels, and then enables the VGA PIO
-  state machine;
-- `graphics_set_palette()` makes one VGA palette entry and one NTSC palette
-  entry from the same RGB888 color;
+The same public calls are used for VGA, NTSC, and dual output:
+
+- `graphics_init()` starts every selected output; when NTSC is present it also
+  sets the voltage and the 315 MHz system clock;
+- `graphics_set_palette()` makes the selected output palette entries from one
+  RGB888 color;
 - `graphics_get_framebuffer()` returns the built-in 320 x 240 primary buffer;
-- `graphics_present_framebuffer()` sends one buffer-swap request to both
-  outputs and waits until both have accepted it;
-- `graphics_set_buffer()` changes both active framebuffer pointers, but only
-  when width is 320 and height is 240.
+- `graphics_present_framebuffer()` sends a buffer-swap request to every
+  selected output and waits until all have accepted it;
+- `graphics_set_buffer()` changes every selected active framebuffer pointer,
+  but only when width is 320 and height is 240.
 
 Some API calls are present for source compatibility with the older graphics
-code, but they have no effect in dual mode:
+code, but they have no effect in the three fixed 320 x 240 output forms:
 
 - `graphics_set_mode()`;
 - `graphics_set_offset()`;
@@ -100,41 +103,38 @@ code, but they have no effect in dual mode:
 - `graphics_set_flashmode()`.
 
 `graphics_set_textbuffer()` only stores the text-buffer pointer. Text-mode
-scanout is not part of the dual driver.
+scanout is not part of these drivers.
 
-### `drivers/vga-nextgen/vga-dual.c`
+### `drivers/vga-nextgen`
 
-This is the VGA driver used when `GRAPHICS_DUAL_OUTPUT=ON`. It is a small,
-fixed 640 x 480 VGA scanout for a 320 x 240 indexed source.
+This is a portable VGA module with the CMake target `vga-nextgen`.
 
-### `drivers/vga-nextgen/vga.c`
+- `vga.c` is the optimized fixed 640 x 480 VGA scanout for a 320 x 240 indexed
+  source;
+- `vga.h` gives its internal backend API;
+- `graphics.c` implements the public `graphics.h` API when VGA is used alone.
 
-This is the older VGA driver. It is put into the `vga-nextgen` interface target
-when `GRAPHICS_DUAL_OUTPUT=OFF`. It has text, CGA, TGA, EGA, Hercules, and VGA
-mode decoders. These are fixed cases in a large `graphics_mode` switch; they
-are not a general custom-timing API.
+Linking this target adds `VGA=1` to the final program. The old emulator-specific
+VGA driver and its large mode switch have been removed.
 
-The old driver also has direct dependencies on emulator state such as
-`VIDEORAM`, `vram_offset`, and other external symbols. It is not used by the
-default dual build, and the dual driver does not use its mode switch. The
-current `drivers/graphics/CMakeLists.txt` links `vga-nextgen` only when dual
-output is on. As a result, turning dual output off does not make a complete
-VGA-only root build without more CMake and emulator integration work.
+### `drivers/ntsc-tv`
 
-### `ntsc-tv-out.h`
+This is a portable NTSC module with the CMake target `ntsc-tv-driver`.
 
-This is the current NTSC implementation. It is header-based and keeps its
-state in `static` objects. The current project includes it from
-`drivers/graphics/graphics.c` only.
+- `ntsc-tv.c` owns the PWM, DMA, IRQ, scanline buffers, palette tables, and
+  framebuffer pointers;
+- `ntsc-tv.h` gives its internal backend API and the default GPIO setting;
+- `graphics.c` implements the public `graphics.h` API for NTSC-only and dual
+  output.
 
-Including this header from more than one C translation unit will make a
-separate NTSC state and framebuffer in every unit. It must not be treated like
-a normal shared public header without first moving its state and functions to
-a `.c` file.
+Linking this target adds `NTSC_TV=1` to the final program. If `VGA=1` is also
+present, this module's graphics adapter starts both drivers and sends every
+graphics API action to both. The VGA-only adapter compiles to an empty unit in
+that form, so there is one and only one public graphics implementation.
 
 ## Clock tree
 
-The dual path changes the chip-wide system clock:
+The NTSC-only and dual paths change the chip-wide system clock:
 
 ```text
 clk_sys = 315 MHz
@@ -142,7 +142,9 @@ clk_sys = 315 MHz
 
 It also asks for a 1.30 V core voltage before making that clock change.
 
-This clock is used by both outputs.
+In dual output this clock is used by both outputs. VGA-only does not change the
+system clock or core voltage; its PIO divider is made from the clock set by the
+application.
 
 ### NTSC sample clock
 
@@ -223,7 +225,7 @@ framebuffer + y * 320
 
 ### NTSC palette
 
-`graphics_set_palette(index, RGB888)` calls `ntsc_set_color()`. The function
+`graphics_set_palette(index, RGB888)` calls `ntsc_tv_set_palette()`. The driver
 uses integer math to get luminance and two chroma parts. It then makes four
 PWM values for the four subcarrier phases.
 
@@ -391,8 +393,8 @@ are different.
   smaller and quicker tested form for the Cortex-M33 output loop.
 
 Both DMA handlers use `__time_critical_func`, so Pico SDK puts the hot IRQ code
-in RAM. `ntsc-tv-out.h` also asks GCC for `O3` on its code. The root build uses
-`O3`, LTO, whole-program work, function sections, and data sections.
+in RAM. `drivers/ntsc-tv/ntsc-tv.c` also asks GCC for `O3` on its code. The root
+build uses `O3`, LTO, whole-program work, function sections, and data sections.
 
 ## Framebuffer presentation
 
@@ -404,7 +406,7 @@ Both output drivers keep two framebuffer pointers:
 Presentation uses release/acquire memory fences so all pixel writes are public
 before an IRQ accepts the pointer.
 
-`graphics_present_framebuffer()` works in this order:
+In dual output, `graphics_present_framebuffer()` works in this order:
 
 1. put the new pointer into the VGA pending slot;
 2. put it into the NTSC pending slot;
@@ -420,6 +422,9 @@ This is frame-request synchronization, not signal or scanline lock. VGA and
 NTSC have separate counters and different frame structures. For a short time,
 one output may show the new buffer while the other still shows the old one.
 
+In a single-output build the same call requests and waits for that one output
+only.
+
 Palette writes are direct. There is no pending palette and no full-palette
 swap at vertical blank. The demo sets its palette before scanout starts.
 
@@ -432,13 +437,13 @@ The current demo has this split:
 | core 0 | init, DMA IRQ 0, DMA IRQ 1, status LED loop |
 | core 1 | complete frame rendering and presentation wait |
 
-`graphics_init()` installs and enables both exclusive DMA IRQ handlers on the
-core which calls it. In this demo that is core 0. An application which calls it
-from another core will change IRQ ownership.
+`graphics_init()` installs and enables each selected output's exclusive DMA IRQ
+handler on the core which calls it. In this demo that is core 0. An application
+which calls it from another core will change IRQ ownership.
 
 ## Hardware resources and integration effects
 
-The dual driver takes or changes these chip resources:
+The default dual form takes or changes these chip resources:
 
 | Resource | Current use |
 |---|---|
@@ -454,6 +459,10 @@ The dual driver takes or changes these chip resources:
 
 There is no deinit path. Claimed DMA channels, PIO state, IRQ handlers, and the
 PWM output stay active for the life of the program.
+
+VGA-only takes two DMA channels, DMA IRQ 1, one PIO state machine, and GPIO
+6..13. NTSC-only takes two DMA channels, DMA IRQ 0, one PWM slice/channel, and
+GPIO27. Only a form with NTSC changes the system clock and core voltage.
 
 The exclusive IRQ handlers are important when this code is put into a larger
 program: another module cannot also install an exclusive handler on the same
@@ -512,26 +521,60 @@ current code limit if the NTSC vertical layout is changed.
 
 ## Build system
 
-The project uses CMake 3.21 or newer, Pico SDK, and C23. The default CMake
-option is:
-
-```text
-GRAPHICS_DUAL_OUTPUT=ON
-```
-
-With this option on:
-
-- `drivers/vga-nextgen/vga-dual.c` is built;
-- `drivers/vga-nextgen/vga.c` is not built;
-- `drivers/graphics/graphics.c` gives the common VGA/NTSC API;
-- both outputs are started by `graphics_init()`.
-
-Other options are:
+The project uses CMake 3.21 or newer, Pico SDK, and C23. Two independent CMake
+options select the output modules:
 
 | CMake option | Default | Effect |
 |---|---:|---|
+| `VGA` | `ON` | link `vga-nextgen` and set `VGA=1` |
+| `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
 | `NTSC_USE_SCRATCH_Y` | `OFF` | put NTSC palette tables in scratch Y |
+
+This gives the three supported forms:
+
+| Form | CMake values | Driver targets |
+|---|---|---|
+| VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga-nextgen` |
+| NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-tv-driver` |
+| Dual | `VGA=ON`, `NTSC_TV=ON` | all three targets |
+
+CMake stops with an error if both outputs are off.
+
+### Use in another project
+
+The NTSC module is self-contained under `drivers/ntsc-tv`. Copy that folder
+next to the existing `drivers/graphics` folder, then add:
+
+```cmake
+add_subdirectory(drivers/ntsc-tv)
+target_link_libraries(your_program PRIVATE graphics ntsc-tv-driver)
+```
+
+The interface target adds the source files, include path, Pico hardware
+libraries, and `NTSC_TV=1`. It also pre-includes `ntsc-tv.h`, so an older
+`graphics.h` can still get its display-size and `RGB888` definitions from the
+selected driver. Application code continues to include only `graphics.h` and
+use `graphics_init()`, `graphics_set_buffer()`, and `graphics_set_palette()`.
+
+For dual output, also copy this project's refactored `drivers/vga-nextgen`
+folder, then add and link VGA:
+
+```cmake
+add_subdirectory(drivers/vga-nextgen)
+target_link_libraries(your_program PRIVATE
+        graphics
+        vga-nextgen
+        ntsc-tv-driver
+)
+```
+
+No driver source has to be included by the application. The two target compile
+definitions select the dual graphics adapter automatically.
+
+The old multi-mode VGA driver cannot be used in this dual form because it owns
+the same public `graphics_*` names. NTSC-only use needs only the new
+`drivers/ntsc-tv` folder.
 
 `pico_add_extra_outputs()` makes ELF, BIN, HEX, disassembly, and UF2 output.
 
@@ -556,8 +599,9 @@ The presets select:
 | `rp2040` | `pico` | `rp2040` | Cortex-M0+ |
 | `rp2350` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 
-Both use `MinSizeRel`, Ninja, UF2 output, normal NTSC palette RAM, and no
-scratch placement. The RP2350 preset also sets `PICO_NO_COPRO_DIS=ON`.
+Both use `MinSizeRel`, Ninja, UF2 output, VGA plus NTSC, normal NTSC palette
+RAM, and no scratch placement. The RP2350 preset also sets
+`PICO_NO_COPRO_DIS=ON`.
 
 Picotool is fetched under:
 
