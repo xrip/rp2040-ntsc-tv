@@ -13,6 +13,46 @@
 #include <hardware/sync.h>
 #include <pico/platform.h>
 
+// Two timings share this file, because they also share one 8-bit resistor bus
+// and the one PIO instruction below. VGA is 31.5 kHz with separate H and V sync
+// on bits 6 and 7. VGA_RGBS is the 15.734 kHz 240p that a SCART set wants, with
+// one composite sync wire on bit 7. Both keep 800 samples in a line, so the
+// buffers, the DMA and the line-building code do not change.
+#if VGA_RGBS
+enum {
+    VGA_DUAL_LINE_SAMPLES = 800,
+    // A sample is 79.4 ns, so 59 of them make the 4.7 us sync pulse.
+    VGA_DUAL_HSYNC_SAMPLES = 59,
+    // 128 samples is 10.2 us from the start of sync, so the back porch is
+    // 5.5 us, safely over the 4.7 us a set expects, and the left edge is never
+    // clipped. The picture then ends 32 samples (2.5 us) before the next sync,
+    // which is a slightly wide right border. Move this to shift the picture;
+    // it must stay a multiple of 4 for the 32-bit stores further down.
+    VGA_DUAL_ACTIVE_OFFSET = 128,
+    VGA_DUAL_ACTIVE_LINES = 240,
+    VGA_DUAL_TOTAL_LINES = 262,
+    VGA_DUAL_VSYNC_FIRST_LINE = 243,
+    VGA_DUAL_VSYNC_LINES = 3,
+    VGA_DUAL_SOURCE_WIDTH = 320,
+    VGA_DUAL_LINE_WORDS = VGA_DUAL_LINE_SAMPLES / sizeof(uint32_t),
+    VGA_DUAL_BLANK_BUFFER = 0,
+    VGA_DUAL_VSYNC_BUFFER = 1,
+    VGA_DUAL_ACTIVE_BUFFER_0 = 2,
+    VGA_DUAL_ACTIVE_BUFFER_1 = 3,
+    // Bit 7 is the one sync wire, so every pulse pulls only bit 7 low and
+    // bit 6 is held high and unused. Bits 5:0 are still R2 G2 B2, which is why
+    // the palette and the text table below need no change.
+    VGA_DUAL_BLANK_LEVEL = 0xc0,
+    VGA_DUAL_HSYNC_LEVEL = 0x40,
+    // 800 samples at 15.734 kHz lines, which is half the VGA pixel clock.
+    VGA_DUAL_PIXEL_CLOCK_HZ = 12587500,
+    // 240 active lines / 8 = the 30 text rows of TEXTMODE_ROWS.
+    VGA_DUAL_TEXT_FONT_HEIGHT = 8,
+    // Half a line. The broad vertical pulse is cut by a serration here, so the
+    // set keeps its line lock while the vertical pulse is low.
+    VGA_DUAL_SERRATION_STEP = VGA_DUAL_LINE_SAMPLES / 2
+};
+#else
 enum {
     VGA_DUAL_LINE_SAMPLES = 800,
     VGA_DUAL_HSYNC_SAMPLES = 96,
@@ -35,6 +75,7 @@ enum {
     // 480 active lines / 16 = the 30 text rows of TEXTMODE_ROWS.
     VGA_DUAL_TEXT_FONT_HEIGHT = 16
 };
+#endif
 
 static const uint16_t vga_dual_program_instructions[] = {
         0x6008 // out pins, 8
@@ -111,8 +152,19 @@ static void vga_dual_make_templates(void) {
     memset(blank, VGA_DUAL_BLANK_LEVEL, VGA_DUAL_LINE_SAMPLES);
     memset(blank, VGA_DUAL_HSYNC_LEVEL, VGA_DUAL_HSYNC_SAMPLES);
 
+#if VGA_RGBS
+    // The broad pulse of a composite sync: the one sync wire is low for the
+    // whole line, cut by a short serration at the end of each half line.
+    memset(vsync, VGA_DUAL_HSYNC_LEVEL, VGA_DUAL_LINE_SAMPLES);
+    for (size_t half = 0; half < VGA_DUAL_LINE_SAMPLES;
+         half += VGA_DUAL_SERRATION_STEP) {
+        memset(vsync + half + VGA_DUAL_SERRATION_STEP - VGA_DUAL_HSYNC_SAMPLES,
+               VGA_DUAL_BLANK_LEVEL, VGA_DUAL_HSYNC_SAMPLES);
+    }
+#else
     memset(vsync, VGA_DUAL_VSYNC_LEVEL, VGA_DUAL_LINE_SAMPLES);
     memset(vsync, VGA_DUAL_COMBINED_SYNC_LEVEL, VGA_DUAL_HSYNC_SAMPLES);
+#endif
 
     memcpy(vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_0),
            blank, VGA_DUAL_LINE_SAMPLES);
@@ -185,8 +237,13 @@ static __force_inline void vga_dual_generate_text_line(
     for (unsigned column = columns; column--;) {
         const uint8_t character = *cell++;
         const uint8_t attribute = *cell++;
+#if VGA_RGBS
+        uint8_t glyph = font_8x8[character * VGA_DUAL_TEXT_FONT_HEIGHT +
+                                 glyph_line];
+#else
         uint8_t glyph = font_8x16[character * VGA_DUAL_TEXT_FONT_HEIGHT +
                                   glyph_line];
+#endif
         const uint16_t *pair = &vga_dual_text_pairs[attribute * 4u];
 
         for (unsigned step = 4; step--;) {
@@ -223,11 +280,18 @@ static inline void vga_dual_prepare_line(const size_t line) {
             return;
         }
 
+#if VGA_RGBS
+        // 240 output lines take the 240 source lines one for one. Nothing is
+        // doubled, so there is no odd line to skip and the picture comes out at
+        // its own size.
+        const size_t source_line = line;
+#else
         if ((line & 1u) != 0u) {
             return;
         }
 
         const size_t source_line = line >> 1u;
+#endif
         const uint8_t *pending = NULL;
         if (line == 0u) {
             pending = vga_dual_pending_framebuffer;

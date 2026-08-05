@@ -112,6 +112,28 @@
         "NTSC_TV": "ON",
         "TFT": "ON"
       }
+    },
+    {
+      "name": "rp2040-rgbs",
+      "displayName": "RP2040 / RGBs 240p (SCART)",
+      "inherits": "rp2040",
+      "binaryDir": "${sourceDir}/cmake-build-rp2040-rgbs",
+      "cacheVariables": {
+        "VGA": "ON",
+        "NTSC_TV": "OFF",
+        "RGBS": "ON"
+      }
+    },
+    {
+      "name": "rp2350-rgbs",
+      "displayName": "RP2350 / RGBs 240p (SCART)",
+      "inherits": "rp2350",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-rgbs",
+      "cacheVariables": {
+        "VGA": "ON",
+        "NTSC_TV": "OFF",
+        "RGBS": "ON"
+      }
     }
   ]
 }

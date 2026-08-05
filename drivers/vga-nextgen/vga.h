@@ -17,6 +17,14 @@ extern "C" {
 #define VGA_ENABLE_DITHER 1
 #endif
 
+// Set to 1 for 15 kHz 240p RGBs on the same pins, which is what a SCART set
+// takes. Sync is then one composite wire on bit 7 (GPIO 13), and bit 6 is
+// unused. A VGA monitor will not lock to it, and a SCART set will not lock to
+// the normal 31.5 kHz timing, so this is chosen once at build time.
+#ifndef VGA_RGBS
+#define VGA_RGBS 0
+#endif
+
 #ifndef TEXTMODE_COLS
 #define TEXTMODE_COLS 80
 #endif

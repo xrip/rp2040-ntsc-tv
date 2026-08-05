@@ -7,6 +7,11 @@ target_sources(vga-nextgen INTERFACE
 
 target_compile_definitions(vga-nextgen INTERFACE VGA=1)
 
+# The same pins and the same PIO program, at the 15 kHz 240p a SCART set takes.
+if (RGBS)
+    target_compile_definitions(vga-nextgen INTERFACE VGA_RGBS=1)
+endif()
+
 target_link_libraries(vga-nextgen INTERFACE
         graphics
         hardware_pio

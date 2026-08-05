@@ -17,6 +17,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 pico_sdk_init()
 
 option(VGA "Enable VGA output" ON)
+option(RGBS "Use 15 kHz 240p RGBs (SCART) timing on the VGA pins" OFF)
 option(NTSC_TV "Enable NTSC composite output" ON)
 option(HDMI "Enable HDMI output" OFF)
 option(TFT "Enable TFT output" OFF)
@@ -25,6 +26,10 @@ option(NTSC_USE_SCRATCH_Y "Place NTSC palette tables in scratch Y" OFF)
 
 if (NOT VGA AND NOT NTSC_TV AND NOT HDMI AND NOT TFT)
     message(FATAL_ERROR "Enable at least one video output: VGA, NTSC_TV, HDMI, or TFT")
+endif()
+
+if (RGBS AND NOT VGA)
+    message(FATAL_ERROR "RGBS is a timing for the VGA output; enable VGA as well")
 endif()
 
 if (HDMI AND (VGA OR NTSC_TV))
@@ -98,6 +103,9 @@ target_link_libraries(${PROJECT_NAME}
 
 if (VGA)
     target_link_libraries(${PROJECT_NAME} vga-nextgen)
+    if (RGBS)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-rgbs")
+    endif()
 endif()
 if (NTSC_TV)
     target_link_libraries(${PROJECT_NAME} ntsc-tv-driver)
