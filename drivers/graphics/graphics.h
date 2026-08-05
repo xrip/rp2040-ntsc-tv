@@ -89,6 +89,11 @@ void graphics_init(void);
 
 void graphics_set_mode(enum graphics_mode_t mode);
 
+// Waits for the start of the next output frame. With a single framebuffer a
+// producer calls this and then draws top to bottom, staying in front of the
+// beam, so no half-drawn row reaches the screen and no second buffer is needed.
+void graphics_wait_vblank(void);
+
 void graphics_set_buffer(uint8_t *buffer, uint16_t width, uint16_t height);
 
 void graphics_set_offset(int x, int y);

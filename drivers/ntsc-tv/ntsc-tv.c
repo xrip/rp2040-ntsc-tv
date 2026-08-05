@@ -72,6 +72,8 @@ caused by using this program.
 // Scanout reads only the active buffer. A producer may prepare another
 // framebuffer and request an atomic swap at the start of the next frame.
 static const uint8_t *ntsc_active_framebuffer;
+// The line now going out. Read from the other core, so it is volatile.
+static volatile size_t ntsc_current_scanline = 2;
 static const uint8_t *volatile ntsc_pending_framebuffer;
 
 // Ping-pong buffers for DMA double-buffering
@@ -138,6 +140,25 @@ void ntsc_tv_wait_framebuffer(void) {
         tight_loop_contents();
     }
     __mem_fence_acquire();
+}
+
+size_t ntsc_tv_current_line(void) {
+    return ntsc_current_scanline;
+}
+
+void ntsc_tv_wait_vblank(void) {
+    // Return the moment the line counter runs backwards, which is the start of
+    // a frame. Called from anywhere in a frame this waits at most one frame,
+    // and it hands the caller the longest possible lead over the beam.
+    size_t previous = ntsc_current_scanline;
+    while (true) {
+        const size_t line = ntsc_current_scanline;
+        if (line < previous) {
+            return;
+        }
+        previous = line;
+        tight_loop_contents();
+    }
 }
 
 // The data channel sends a scanline. The control channel selects the next buffer.
@@ -388,10 +409,9 @@ void ntsc_tv_set_framebuffer(const uint8_t *framebuffer) {
  * Purpose: Handle DMA transfer completion and prepare next scanline
  * =========================================================================== */
 static void __time_critical_func(ntsc_dma_irq_handler)() {
-    static size_t current_scanline = 2;
     dma_hw->ints0 = 1u << ntsc_dma_chan_data;
 
-    const size_t scanline = current_scanline;
+    const size_t scanline = ntsc_current_scanline;
     uint16_t *output_buffer = ntsc_scanline_buffers[scanline & 1u];
 
     if (scanline == 0) {
@@ -404,9 +424,11 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
         }
     }
 
-    if (++current_scanline >= NTSC_TOTAL_LINES) {
-        current_scanline = 0;
+    size_t next_scanline = scanline + 1u;
+    if (next_scanline >= NTSC_TOTAL_LINES) {
+        next_scanline = 0;
     }
+    ntsc_current_scanline = next_scanline;
 
     ntsc_generate_scanline(output_buffer, scanline);
 }

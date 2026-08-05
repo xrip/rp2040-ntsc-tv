@@ -264,6 +264,11 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
     graphics_source_set_mode(mode);
 }
 
+void graphics_wait_vblank(void) {
+    // The panel holds its own frame memory and is pushed a whole frame at a
+    // time, so there is no beam here to stay in front of.
+}
+
 void graphics_set_buffer(uint8_t *buffer,
                          const uint16_t width,
                          const uint16_t height) {

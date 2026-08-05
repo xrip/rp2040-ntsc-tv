@@ -31,6 +31,10 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
     graphics_source_set_mode(mode);
 }
 
+void graphics_wait_vblank(void) {
+    vga_wait_vblank();
+}
+
 void graphics_set_buffer(uint8_t *buffer,
                          const uint16_t width,
                          const uint16_t height) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -43,6 +44,8 @@ void ntsc_tv_set_framebuffer(const uint8_t *framebuffer);
 void ntsc_tv_request_framebuffer(const uint8_t *framebuffer);
 void ntsc_tv_wait_framebuffer(void);
 void ntsc_tv_set_palette(uint8_t index, uint32_t color888);
+size_t ntsc_tv_current_line(void);
+void ntsc_tv_wait_vblank(void);
 
 #ifdef __cplusplus
 }

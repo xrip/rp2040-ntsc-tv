@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -36,6 +37,8 @@ void vga_set_framebuffer(const uint8_t *framebuffer);
 void vga_request_framebuffer(const uint8_t *framebuffer);
 void vga_wait_framebuffer(void);
 void vga_set_palette(uint8_t index, uint32_t color888);
+size_t vga_current_line(void);
+void vga_wait_vblank(void);
 
 #ifdef __cplusplus
 }

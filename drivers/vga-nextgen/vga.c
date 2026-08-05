@@ -95,6 +95,8 @@ static uint vga_dual_sm;
 static uint vga_dual_dma_data;
 static uint vga_dual_dma_control;
 static volatile uintptr_t vga_dual_next_line_address;
+// The line now going out. Read from the other core, so it is volatile.
+static volatile size_t vga_dual_current_line;
 static const uint8_t *vga_dual_active_framebuffer;
 static const uint8_t *volatile vga_dual_pending_framebuffer;
 
@@ -256,14 +258,33 @@ static inline void vga_dual_prepare_line(const size_t line) {
             (uintptr_t)vga_dual_line_buffer(VGA_DUAL_BLANK_BUFFER);
 }
 
-static void __time_critical_func(vga_dual_dma_handler)(void) {
-    static size_t current_line;
+size_t vga_current_line(void) {
+    return vga_dual_current_line;
+}
 
+void vga_wait_vblank(void) {
+    // Return the moment the line counter runs backwards, which is the start of
+    // a frame. Called from anywhere in a frame this waits at most one frame,
+    // and it hands the caller the longest possible lead over the beam.
+    size_t previous = vga_dual_current_line;
+    while (true) {
+        const size_t line = vga_dual_current_line;
+        if (line < previous) {
+            return;
+        }
+        previous = line;
+        tight_loop_contents();
+    }
+}
+
+static void __time_critical_func(vga_dual_dma_handler)(void) {
     dma_hw->ints1 = 1u << vga_dual_dma_control;
 
+    size_t current_line = vga_dual_current_line;
     if (++current_line == VGA_DUAL_TOTAL_LINES) {
         current_line = 0;
     }
+    vga_dual_current_line = current_line;
     size_t following_line = current_line + 1u;
     if (following_line == VGA_DUAL_TOTAL_LINES) {
         following_line = 0;

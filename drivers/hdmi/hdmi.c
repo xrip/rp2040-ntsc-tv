@@ -486,6 +486,11 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
     (void)mode;
 }
 
+void graphics_wait_vblank(void) {
+    // Not wired up here yet. A caller which needs it gets no pacing rather
+    // than a wrong one.
+}
+
 void graphics_set_palette(const uint8_t index, const uint32_t color888) {
     const uint8_t color_code = hdmi_color_code(index);
     uint64_t *tmds_color = (uint64_t *)tmds_palette_buffer + color_code * 2;

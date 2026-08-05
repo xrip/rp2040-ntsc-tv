@@ -55,6 +55,17 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
     graphics_source_set_mode(mode);
 }
 
+void graphics_wait_vblank(void) {
+    // A tear on composite is hard to see: the signal is soft and band-limited,
+    // so the join has no sharp edge. VGA into a flat panel shows the same tear
+    // as a clean line, so when both run the caller is paced by VGA.
+#if defined(VGA)
+    vga_wait_vblank();
+#else
+    ntsc_tv_wait_vblank();
+#endif
+}
+
 void graphics_set_buffer(uint8_t *buffer,
                          const uint16_t width,
                          const uint16_t height) {
