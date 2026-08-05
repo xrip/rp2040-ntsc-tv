@@ -14,6 +14,12 @@ target_compile_options(ntsc-tv-driver INTERFACE
         $<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_CURRENT_LIST_DIR}/ntsc-tv.h>
 )
 
+# The default is GPIO27, set by ntsc-tv.h. A board which already uses that pin
+# gives another one here; a command-line define beats every header default.
+if (DEFINED NTSC_PIN_OUTPUT)
+    target_compile_definitions(ntsc-tv-driver INTERFACE NTSC_PIN_OUTPUT=${NTSC_PIN_OUTPUT})
+endif()
+
 option(NTSC_LOW_RAM "Use compact NTSC palette tables" OFF)
 if (NTSC_LOW_RAM)
     target_compile_definitions(ntsc-tv-driver INTERFACE NTSC_LOW_RAM=1)
@@ -25,6 +31,7 @@ if (NTSC_USE_SCRATCH_Y)
 endif()
 
 target_link_libraries(ntsc-tv-driver INTERFACE
+        graphics
         hardware_dma
         hardware_gpio
         hardware_irq

@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include <graphics_modes.h>
+
 #include <hardware/clocks.h>
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
@@ -29,7 +31,9 @@ enum {
     VGA_DUAL_HSYNC_LEVEL = 0x80,
     VGA_DUAL_VSYNC_LEVEL = 0x40,
     VGA_DUAL_COMBINED_SYNC_LEVEL = 0x00,
-    VGA_DUAL_PIXEL_CLOCK_HZ = 25175000
+    VGA_DUAL_PIXEL_CLOCK_HZ = 25175000,
+    // 480 active lines / 16 = the 30 text rows of TEXTMODE_ROWS.
+    VGA_DUAL_TEXT_FONT_HEIGHT = 16
 };
 
 static const uint16_t vga_dual_program_instructions[] = {
@@ -42,6 +46,38 @@ static const struct pio_program vga_dual_program = {
         .origin = -1
 };
 
+// Text colors as VGA bus values. The RGB parts of the CGA set are only 0x00,
+// 0x55, 0xaa, or 0xff, and for those four the lower and upper dither levels of
+// vga_set_palette() agree, so one value serves and text never shimmers.
+#define VGA_DUAL_TEXT_LEVEL(part) ((part) / 85u)
+#define VGA_DUAL_TEXT_DAC(color) ((uint16_t)(VGA_DUAL_BLANK_LEVEL | \
+        VGA_DUAL_TEXT_LEVEL(GRAPHICS_CGA_RED(color)) << 4 | \
+        VGA_DUAL_TEXT_LEVEL(GRAPHICS_CGA_GREEN(color)) << 2 | \
+        VGA_DUAL_TEXT_LEVEL(GRAPHICS_CGA_BLUE(color))))
+
+// Two pixels for one 16-bit store. The low byte is the left pixel, and the
+// index is the next two glyph bits, lowest bit first.
+#define VGA_DUAL_TEXT_QUAD(foreground, background) \
+    (uint16_t)(VGA_DUAL_TEXT_DAC(background) | VGA_DUAL_TEXT_DAC(background) << 8), \
+    (uint16_t)(VGA_DUAL_TEXT_DAC(foreground) | VGA_DUAL_TEXT_DAC(background) << 8), \
+    (uint16_t)(VGA_DUAL_TEXT_DAC(background) | VGA_DUAL_TEXT_DAC(foreground) << 8), \
+    (uint16_t)(VGA_DUAL_TEXT_DAC(foreground) | VGA_DUAL_TEXT_DAC(foreground) << 8),
+
+// The generated table is the initial data only; vga_init() copies it into the
+// 2 KB RAM table below, which is where the older driver kept it too.
+//
+// This one table cannot stay in flash. A text line reads it four times for
+// every character cell, so 320 flash reads land inside one 31.7 us VGA line,
+// and each shares the single QSPI bus with whatever the other core is running.
+// A late line buffer then shows up as a shaking picture. The font is read once
+// per cell, an eighth as often, and stays in flash as before; VGA and NTSC read
+// their fonts from there without trouble.
+static const uint16_t vga_dual_text_pairs_source[256 * 4] = {
+        GRAPHICS_TEXT_ATTRIBUTES(VGA_DUAL_TEXT_QUAD)
+};
+
+static uint16_t vga_dual_text_pairs[256 * 4] __attribute__((aligned(8)));
+
 #if VGA_ENABLE_DITHER
 static uint16_t vga_dual_palette[2][256] __attribute__((aligned(4)));
 static uint8_t vga_dual_frame_phase;
@@ -50,6 +86,9 @@ static uint16_t vga_dual_palette[256] __attribute__((aligned(4)));
 #endif
 static uint32_t vga_dual_scanline_buffers[4][VGA_DUAL_LINE_WORDS]
         __attribute__((aligned(16)));
+// Scratch line for the mode composer. NTSC has its own, because the two
+// backends build their lines from separate interrupts.
+static uint8_t vga_dual_staging[VGA_DUAL_SOURCE_WIDTH] __attribute__((aligned(4)));
 
 static PIO vga_dual_pio = PIO_VGA;
 static uint vga_dual_sm;
@@ -86,8 +125,9 @@ static void __time_critical_func(vga_dual_generate_active_line)(
 static __force_inline void vga_dual_generate_active_line(
         const size_t source_line, uint32_t *line_buffer) {
 #endif
-    const uint8_t *source =
-            vga_dual_active_framebuffer + source_line * VGA_DUAL_SOURCE_WIDTH;
+    const uint8_t *source = graphics_source_line(vga_dual_active_framebuffer,
+                                                 source_line,
+                                                 vga_dual_staging);
     uint16_t *output = (uint16_t *)((uint8_t *)line_buffer +
                                   VGA_DUAL_ACTIVE_OFFSET);
     uint32_t groups = VGA_DUAL_SOURCE_WIDTH / 4u;
@@ -120,8 +160,67 @@ static __force_inline void vga_dual_generate_active_line(
     } while (--groups);
 }
 
+// One text scanline: 80 columns of 8 pixels fill the whole 640-sample active
+// area, so the picture keeps its full 640 x 480 size. Two pixels are written
+// per 16-bit store; the four (left, right) color pairs of a cell are built once
+// per column. The low byte of a 16-bit store is the left pixel.
+static __force_inline void vga_dual_generate_text_line(
+        const size_t line, uint32_t *line_buffer) {
+    unsigned glyph_line;
+    const uint8_t *cell = graphics_text_row(line, VGA_DUAL_TEXT_FONT_HEIGHT,
+                                            &glyph_line);
+    uint16_t *output = (uint16_t *)((uint8_t *)line_buffer +
+                                    VGA_DUAL_ACTIVE_OFFSET);
+
+    if (cell == NULL) {
+        memset(output, (uint8_t)vga_dual_text_pairs[0], GRAPHICS_TEXT_SAMPLES);
+        return;
+    }
+
+    const unsigned columns = graphics_text_columns();
+    const bool wide = columns * 8u < GRAPHICS_TEXT_SAMPLES;
+
+    for (unsigned column = columns; column--;) {
+        const uint8_t character = *cell++;
+        const uint8_t attribute = *cell++;
+        uint8_t glyph = font_8x16[character * VGA_DUAL_TEXT_FONT_HEIGHT +
+                                  glyph_line];
+        const uint16_t *pair = &vga_dual_text_pairs[attribute * 4u];
+
+        for (unsigned step = 4; step--;) {
+            const uint16_t both = pair[glyph & 3u];
+            glyph >>= 2;
+            if (wide) {
+                // A 40-column cell is twice as wide, so each pixel is sent
+                // twice: the pair becomes two same-color pairs.
+                *output++ = (uint16_t)((both & 0xffu) * 0x0101u);
+                *output++ = (uint16_t)((both >> 8) * 0x0101u);
+            } else {
+                *output++ = both;
+            }
+        }
+    }
+}
+
 static inline void vga_dual_prepare_line(const size_t line) {
     if (line < VGA_DUAL_ACTIVE_LINES) {
+        // Text has one source line for every physical line, so unlike the
+        // graphics modes it cannot skip the odd ones.
+        if (graphics_source_is_text()) {
+            uint32_t *line_buffer = (line & 1u) != 0u
+                                    ? vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_1)
+                                    : vga_dual_line_buffer(VGA_DUAL_ACTIVE_BUFFER_0);
+            vga_dual_generate_text_line(line, line_buffer);
+            vga_dual_next_line_address = (uintptr_t)line_buffer;
+            if (line == 0u && vga_dual_pending_framebuffer != NULL) {
+                __mem_fence_acquire();
+                vga_dual_active_framebuffer = vga_dual_pending_framebuffer;
+                __mem_fence_release();
+                vga_dual_pending_framebuffer = NULL;
+            }
+            return;
+        }
+
         if ((line & 1u) != 0u) {
             return;
         }
@@ -208,6 +307,11 @@ void vga_set_palette(const uint8_t index, const uint32_t color888) {
 }
 
 void vga_init(const uint8_t *framebuffer) {
+    // Take the busiest text lookup out of flash, so a text line does not wait
+    // on the QSPI bus while the other core is also reading flash.
+    memcpy(vga_dual_text_pairs, vga_dual_text_pairs_source,
+           sizeof vga_dual_text_pairs);
+
     vga_dual_active_framebuffer = framebuffer;
     vga_dual_pending_framebuffer = NULL;
 #if VGA_ENABLE_DITHER

@@ -28,6 +28,8 @@ caused by using this program.
 
 #include <stddef.h>
 
+#include <graphics_modes.h>
+
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
 #include <hardware/irq.h>
@@ -74,6 +76,10 @@ static const uint8_t *volatile ntsc_pending_framebuffer;
 // Size aligned to the 4-byte boundary for DMA efficiency
 static uint16_t ntsc_scanline_buffers[2][NTSC_SAMPLES_PER_LINE + 3 & ~3u] __attribute__ ((aligned (4)));
 
+// Scratch line for the mode composer. VGA has its own, because the two
+// backends build their lines from separate interrupts.
+static uint8_t ntsc_staging[NTSC_FRAME_WIDTH] __attribute__ ((aligned (4)));
+
 // NTSC color palette lookup table
 // Each color has 4 entries for the 4 phases of NTSC color subcarrier (0°, 90°, 180°, 270°)
 // This allows proper color encoding at 3.579545 MHz
@@ -96,6 +102,30 @@ static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256]
 #endif
 
 #undef NTSC_PALETTE_PLACEMENT
+
+// Text uses one sample for each pixel, so a pixel is too short to carry a
+// complete four-phase color cycle. Each color is sent as its luminance only,
+// and the receiver makes the color back from the pixel pattern itself. This is
+// the same artifact color the older driver produced, and it keeps all 640
+// samples of the line instead of dropping to 320 double-width pixels.
+//
+// The 16 values are the zero-chroma form of the palette maths below. They are
+// read-only, so they stay in flash and cost no RAM.
+#define NTSC_TEXT_LUMINANCE(color) ((150u * GRAPHICS_CGA_GREEN(color) + \
+        29u * GRAPHICS_CGA_BLUE(color) + 77u * GRAPHICS_CGA_RED(color) + 128u) / 256u)
+#define NTSC_TEXT_SAMPLE(color) \
+    (uint16_t)((NTSC_TEXT_LUMINANCE(color) * 1792u + 2u * 65536u + 32768u) / 65536u),
+
+#define NTSC_TEXT_COLORS(X) \
+    X(0)  X(1)  X(2)  X(3)  X(4)  X(5)  X(6)  X(7) \
+    X(8)  X(9)  X(10) X(11) X(12) X(13) X(14) X(15)
+
+static const uint16_t ntsc_text_sample[16] = {
+        NTSC_TEXT_COLORS(NTSC_TEXT_SAMPLE)
+};
+
+// 240 active lines / 8 = the 30 text rows of TEXTMODE_ROWS.
+#define NTSC_TEXT_FONT_HEIGHT 8
 
 void ntsc_tv_request_framebuffer(const uint8_t *framebuffer) {
     // Publish all completed pixel writes before the IRQ sees the pointer.
@@ -127,6 +157,43 @@ static inline uint32_t ntsc_unpack_pair(uint32_t pair) {
  * Function: ntsc_generate_scanline
  * Purpose: Generate NTSC composite video signal data for one scanline
  * =========================================================================== */
+// One text scanline: 80 columns of 8 pixels fill all 640 active samples, one
+// sample for each pixel, so the line keeps its full width.
+static inline void ntsc_generate_text_line(uint16_t *output, const size_t active_line) {
+    unsigned glyph_line;
+    const uint8_t *cell = graphics_text_row(active_line, NTSC_TEXT_FONT_HEIGHT,
+                                            &glyph_line);
+
+    if (cell == NULL) {
+        for (int i = 0; i < GRAPHICS_TEXT_SAMPLES; i++) {
+            *output++ = ntsc_text_sample[0];
+        }
+        return;
+    }
+
+    const unsigned columns = graphics_text_columns();
+    const bool wide = columns * 8u < GRAPHICS_TEXT_SAMPLES;
+
+    for (unsigned column = columns; column--;) {
+        const uint8_t character = *cell++;
+        const uint8_t attribute = *cell++;
+        uint8_t glyph = font_8x8[character * NTSC_TEXT_FONT_HEIGHT + glyph_line];
+        const uint16_t color[2] = {
+                ntsc_text_sample[attribute >> 4],
+                ntsc_text_sample[attribute & 0x0fu]
+        };
+
+        for (unsigned bit = 8; bit--;) {
+            const uint16_t sample = color[glyph & 1u];
+            glyph >>= 1;
+            *output++ = sample;
+            if (wide) {
+                *output++ = sample;
+            }
+        }
+    }
+}
+
 static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t scanline_number) {
     uint16_t *buffer_ptr = output_buffer;
     const size_t active_line = scanline_number - (NTSC_VSYNC_LINES + NTSC_VBLANK_TOP);
@@ -136,8 +203,14 @@ static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t 
         // Skip horizontal blanking interval
         buffer_ptr += NTSC_ACTIVE_START;
 
-        const uint8_t *pixel_ptr =
-                ntsc_active_framebuffer + active_line * NTSC_FRAME_WIDTH;
+        if (graphics_source_is_text()) {
+            ntsc_generate_text_line(buffer_ptr, active_line);
+            return;
+        }
+
+        const uint8_t *pixel_ptr = graphics_source_line(ntsc_active_framebuffer,
+                                                        active_line,
+                                                        ntsc_staging);
         uint32_t *output_ptr = (uint32_t *)buffer_ptr;
 #if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM && PICO_RP2040
         uint32_t pixel_groups = NTSC_FRAME_WIDTH / 2;
@@ -280,6 +353,7 @@ static void ntsc_set_color(const uint8_t palette_index, const uint8_t blue, cons
     // Phase 270°: Y - chroma(90°)
     const int32_t phase3 = (luminance * 1792 - blue_chroma_90 - red_chroma_90 + 2 * 65536 + 32768) / 65536;
 
+
 #if defined(NTSC_LOW_RAM) && NTSC_LOW_RAM
     // Pack as nibble pairs. The current conversion produces values in the
     // 0..11 range; PWM compare values >= TOP + 1 naturally produce 100% duty.
@@ -360,10 +434,13 @@ void ntsc_tv_init(const uint8_t *framebuffer) {
     pwm_init(pwm_slice, &pwm_cfg, true);
     pwm_set_wrap(pwm_slice, pwm_period_cycles - 1);
 
-    // Get PWM compare register address for DMA writes
+    // Get PWM compare register address for DMA writes. The two channels of a
+    // slice share one 32-bit register: channel A is the low half, channel B the
+    // high half. An even output pin is channel A, an odd one channel B.
     volatile void *pwm_compare_addr = &pwm_hw->slice[pwm_slice].cc;
-    // Offset by 2 bytes to write to the upper 16 bits (channel B)
-    pwm_compare_addr = (volatile void *) ((uintptr_t) pwm_compare_addr + 2);
+    if (pwm_gpio_to_channel(NTSC_PIN_OUTPUT) == PWM_CHAN_B) {
+        pwm_compare_addr = (volatile void *) ((uintptr_t) pwm_compare_addr + 2);
+    }
 
     // Allocate one paced data channel and one one-word control channel.
     ntsc_dma_chan_data = dma_claim_unused_channel(true);

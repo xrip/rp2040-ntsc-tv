@@ -8,6 +8,7 @@ target_sources(vga-nextgen INTERFACE
 target_compile_definitions(vga-nextgen INTERFACE VGA=1)
 
 target_link_libraries(vga-nextgen INTERFACE
+        graphics
         hardware_pio
         hardware_dma
         hardware_gpio

@@ -18,8 +18,14 @@ enum {
     GRAPHICS_HDMI_SYSTEM_CLOCK_KHZ = 378000
 };
 
-void graphics_init(void) {
-#if defined(HDMI)
+// An application which already owns the system clock, or which must set it
+// before starting a second core, defines GRAPHICS_NO_CLOCK_SETUP. It then has
+// to supply the clock the selected form needs by itself.
+#if defined(GRAPHICS_NO_CLOCK_SETUP)
+static void graphics_prepare_clock(void) {
+}
+#elif defined(HDMI)
+static void graphics_prepare_clock(void) {
 #if PICO_RP2040
     hw_set_bits(&vreg_and_chip_reset_hw->vreg,
                 VREG_AND_CHIP_RESET_VREG_VSEL_BITS);
@@ -29,11 +35,24 @@ void graphics_init(void) {
     sleep_ms(10);
 #endif
     set_sys_clock_khz(GRAPHICS_HDMI_SYSTEM_CLOCK_KHZ, true);
-    hdmi_graphics_init();
+}
 #elif defined(NTSC_TV)
+static void graphics_prepare_clock(void) {
     vreg_set_voltage(VREG_VOLTAGE_1_30);
     sleep_ms(10);
     set_sys_clock_khz(GRAPHICS_NTSC_SYSTEM_CLOCK_KHZ, true);
+}
+#else
+static void graphics_prepare_clock(void) {
+}
+#endif
+
+void graphics_init(void) {
+    graphics_prepare_clock();
+
+#if defined(HDMI)
+    hdmi_graphics_init();
+#elif defined(NTSC_TV)
     ntsc_tv_graphics_init();
 #elif defined(TFT)
     tft_graphics_init();

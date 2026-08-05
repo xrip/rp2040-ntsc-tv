@@ -95,16 +95,98 @@ The same public calls are used for VGA, NTSC, dual output, HDMI, and TFT:
 - `graphics_set_buffer()` changes every selected active framebuffer pointer,
   but only when width is 320 and height is 240.
 
-Some API calls are present for source compatibility with the older graphics
-code, but they have no effect in the fixed 320 x 240 output forms:
+`graphics_modes.c` in the same folder is the shared scanline composer. It holds
+the mode, the application buffer and its size, the offset, and the text-buffer
+pointer, and turns them into one 320-byte line of palette indices for any
+output row. VGA and NTSC call it once for each source row, each with its own
+320-byte scratch line, because the two run from separate interrupts. The mode
+work is therefore written once, not once for each backend.
 
-- `graphics_set_mode()`;
-- `graphics_set_offset()`;
+Two API calls have no effect in the fixed 320 x 240 output forms:
+
 - `graphics_set_bgcolor()`;
 - `graphics_set_flashmode()`.
 
-`graphics_set_textbuffer()` only stores the text-buffer pointer. Text-mode
-scanout is not part of these drivers.
+The border and every off-picture row use palette index 0, as the older driver
+did.
+
+### Modes
+
+`graphics_set_mode()` selects how the composer reads the application buffer.
+Any mode value not listed below keeps the direct path: the built-in 320 x 240
+framebuffer is scanned out with no copy, exactly as before.
+
+| Mode | Picture |
+|---|---|
+| `TEXTMODE_DEFAULT`, `TEXTMODE_160x100` | 80 x 30 text at the full line width |
+| `TEXTMODE_53x30` | 40 x 30 text, every pixel sent twice |
+| `GRAPHICSMODE_DEFAULT` | application buffer, 1x, centred, `y` offset applied |
+| `GG_160x144` | 160-pixel window at source x 48, 1x, centred |
+| `GG_160x144x4x3` | the same window, 2x wide, with a 2:3 line scale |
+
+Text colors are the fixed 16 CGA colors. They do not go through
+`graphics_set_palette()`, so an application keeps all 256 of its own colors and
+cannot recolor text, exactly as in the older driver.
+
+### Text is 640 samples wide
+
+A graphics row is 320 indices and every output sends each one twice. Text does
+not go through that path, because 80 columns of 8-pixel glyphs need 640
+samples. Each backend writes those 640 samples straight into its own scanline
+buffer, one sample for each pixel:
+
+| Output | Text picture | Font | Sample |
+|---|---|---|---|
+| VGA | 640 x 480 | 8x16, 480 / 16 = 30 rows | one 8-bit DAC value |
+| NTSC | 640 x 240 | 8x8, 240 / 8 = 30 rows | one PWM luminance value |
+
+VGA therefore builds a line for every one of its 480 physical lines while a
+text mode is selected, instead of one line for every two.
+
+One NTSC sample is too short to carry a complete four-phase color cycle, so a
+text pixel is sent as luminance only and the receiver makes the color back from
+the pixel pattern itself. This is NTSC artifact color, the same result the older
+driver gave, and it keeps all 640 samples instead of dropping to 320
+double-width pixels.
+
+The pixel loop stays in each backend rather than in the composer: the two have
+different sample sizes and very different time budgets for one line. The
+composer supplies the shared parts — the CGA colors, which mode is text, the
+column count, and the address of the text row.
+
+In both fonts bit 0 of a glyph byte is the leftmost pixel.
+
+### Text lookup tables
+
+Both text tables are built by the preprocessor from the fixed CGA colors, so
+they are `const` and cost no RAM at all:
+
+| Table | Size | Use |
+|---|---:|---|
+| `vga_dual_text_pairs` | 2,048 B | attribute and two glyph bits to two VGA bus values |
+| `ntsc_text_sample` | 32 B | CGA color to one PWM luminance value |
+
+VGA writes two pixels for each 16-bit store, so a text line costs four stores
+for each character cell.
+
+`vga_init()` copies the table and the 8x16 font into RAM, which costs 6 KB.
+They cannot be read from flash while the picture is live: a text line makes
+four table reads and one font read for each character cell, so 400 flash reads
+land inside one 31.7 us VGA line, and each one shares the single QSPI bus with
+whatever the other core is doing. The result was a shaking VGA text picture
+while NTSC stayed steady, because an NTSC line is twice as long and reads only
+the font. Every line builder, and the small mode helpers they call, are marked
+`__time_critical_func` for the same reason.
+
+The 6 KB is taken even by a build which never selects a text mode.
+
+The RGB parts of the CGA set are only `0x00`, `0x55`, `0xaa`, or `0xff`. For
+those four values the lower and upper dither levels of `vga_set_palette()` are
+equal, so one bus value serves both frame phases and text never shimmers.
+
+`GRAPHICSMODE_DEFAULT` and the two `GG_*` modes mask every source byte with
+`0x1f`. This is what the older Master System driver did, because that emulator
+keeps a priority bit in the upper bits of each picture byte.
 
 ### `drivers/vga-nextgen`
 
@@ -518,22 +600,22 @@ full framebuffer or the VGA line buffers.
 
 ## Current format and mode limits
 
-The dual-output code is not format-neutral.
+The scanout is not format-neutral.
 
-- It accepts only 320 x 240.
+- A graphics line is 320 palette indices; only text gets the full 640 samples.
 - It treats every source byte as one palette index.
-- It uses a fixed 320-byte stride.
 - It has no BPP field and no stride argument in the public API.
 - Packed 1-, 2-, or 4-BPP data will be read as index-8 data.
 - RGB565 or RGB888 data will also be read as index-8 data.
 - The VGA signal is fixed at 640 x 480 timing.
 - The NTSC signal and active window are fixed.
-- There is no crop, scale, offset, or letterbox step in the dual path.
-- `graphics_set_mode()` does not select any mode in the dual path.
+- Only the modes listed above crop, scale, or centre; the rest are direct.
+- The composer is used by VGA and NTSC only. HDMI and TFT still take the direct
+  320 x 240 buffer and ignore `graphics_set_mode()`.
 
-Changing only the framebuffer allocation or a width define is not enough. The
-row address math, scanline loops, palette form, active area, DMA count, and line
-buffer sizes are connected to the present 320 x 240 x 8 design.
+Changing the 320 x 240 line and frame size itself is not enough. The row address
+math, scanline loops, palette form, active area, DMA count, and line buffer
+sizes are connected to the present 320 x 240 x 8 design.
 
 ## NTSC line-state note
 
@@ -559,6 +641,17 @@ select the output modules:
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
 | `NTSC_USE_SCRATCH_Y` | `OFF` | put NTSC palette tables in scratch Y |
+| `GRAPHICS_BUILTIN_FRAMEBUFFER` | `ON` | keep the static 320 x 240 buffer |
+| `GRAPHICS_NO_CLOCK_SETUP` | `OFF` | let the application own the system clock |
+
+Turn `GRAPHICS_BUILTIN_FRAMEBUFFER` off when the application gives its own
+picture buffer through `graphics_set_buffer()`. This drops 76,800 bytes of RAM
+and makes `graphics_get_framebuffer()` give `NULL`.
+
+Turn `GRAPHICS_NO_CLOCK_SETUP` on when the application must fix the system clock
+itself, for example before it starts a second core. `graphics_init()` then makes
+no clock or core-voltage change, and the application has to supply the clock the
+selected form needs: 315 MHz for NTSC or dual, 378 MHz for HDMI.
 
 This gives five supported forms:
 

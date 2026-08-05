@@ -11,6 +11,11 @@ extern "C" {
 #define GRAPHICS_FRAME_HEIGHT 240
 #define GRAPHICS_COLOR_COUNT 256
 
+// Graphics modes give 320 pixels and every output sends each pixel twice.
+// Text modes give 640 samples and every output sends each sample once, so the
+// full horizontal resolution of the line is kept.
+#define GRAPHICS_TEXT_SAMPLES 640
+
 #ifdef TFT
 #include "st7789.h"
 #endif
@@ -66,6 +71,15 @@ enum graphics_mode_t {
     COMPOSITE_160x200x16_force = 0x74,
     COMPOSITE_160x200x16 = 0x76,
     // planar VGA
+
+    // Modes kept for the Murmulator emulator family. The scanline composer in
+    // drivers/graphics/graphics_modes.c gives these their picture layout.
+    TEXTMODE_DEFAULT = 0x100,   // 80 x 30 text, font 4x6 on an 8-pixel row pitch
+    TEXTMODE_53x30 = 0x101,     // 40 x 30 text, same font at double width
+    TEXTMODE_160x100 = 0x102,   // same layout as TEXTMODE_DEFAULT
+    GRAPHICSMODE_DEFAULT = 0x103, // app buffer, 1x, centred on the 320-pixel line
+    GG_160x144 = 0x104,         // Game Gear window, 1x, centred
+    GG_160x144x4x3 = 0x105,     // Game Gear window, 2x wide, 2:3 line scale
 };
 
 // Буффер текстового режима

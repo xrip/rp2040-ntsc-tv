@@ -6,14 +6,21 @@
 
 #include <hardware/dma.h>
 
+#include <graphics_modes.h>
+
 #include "ntsc-tv.h"
 
 #if defined(VGA)
 #include <vga.h>
 #endif
 
+#if defined(GRAPHICS_NO_BUILTIN_FRAMEBUFFER)
+#define GRAPHICS_INITIAL_FRAMEBUFFER NULL
+#else
 static uint8_t graphics_framebuffer[GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT]
         __attribute__((aligned(4)));
+#define GRAPHICS_INITIAL_FRAMEBUFFER graphics_framebuffer
+#endif
 
 uint8_t *text_buffer = NULL;
 
@@ -21,11 +28,11 @@ void ntsc_tv_graphics_init(void) {
     uint32_t start_mask = 0;
 
 #if defined(VGA)
-    vga_init(graphics_framebuffer);
+    vga_init(GRAPHICS_INITIAL_FRAMEBUFFER);
     start_mask |= vga_start_mask();
 #endif
 
-    ntsc_tv_init(graphics_framebuffer);
+    ntsc_tv_init(GRAPHICS_INITIAL_FRAMEBUFFER);
     start_mask |= ntsc_tv_start_mask();
 
     dma_start_channel_mask(start_mask);
@@ -36,12 +43,16 @@ void ntsc_tv_graphics_init(void) {
 }
 
 void graphics_set_mode(const enum graphics_mode_t mode) {
-    (void)mode;
+    graphics_source_set_mode(mode);
 }
 
 void graphics_set_buffer(uint8_t *buffer,
                          const uint16_t width,
                          const uint16_t height) {
+    graphics_source_set_buffer(buffer, width, height);
+
+    // A full-size buffer is also the scanout buffer, so the direct modes keep
+    // their zero-copy path.
     if (width != GRAPHICS_FRAME_WIDTH || height != GRAPHICS_FRAME_HEIGHT) {
         return;
     }
@@ -53,8 +64,7 @@ void graphics_set_buffer(uint8_t *buffer,
 }
 
 void graphics_set_offset(const int x, const int y) {
-    (void)x;
-    (void)y;
+    graphics_source_set_offset(x, y);
 }
 
 void graphics_set_palette(const uint8_t index, const uint32_t color) {
@@ -78,7 +88,7 @@ void graphics_set_flashmode(const bool flash_line, const bool flash_frame) {
 }
 
 uint8_t *graphics_get_framebuffer(void) {
-    return graphics_framebuffer;
+    return GRAPHICS_INITIAL_FRAMEBUFFER;
 }
 
 void graphics_present_framebuffer(const uint8_t *framebuffer) {
