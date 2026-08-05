@@ -5,7 +5,7 @@ Raspberry Pi Pico framebuffer. VGA and NTSC can run together. HDMI and TFT are
 single-output forms. The project builds for both RP2040/Cortex-M0+ and
 RP2350/Cortex-M33.
 
-The current dual-output path is made for one exact source format:
+Every output scans out one exact format:
 
 | Property | Current value |
 |---|---:|
@@ -16,9 +16,14 @@ The current dual-output path is made for one exact source format:
 | Framebuffer stride | 320 bytes |
 | Framebuffer size | 76,800 bytes |
 
-VGA and NTSC read the same framebuffer. They do not read the same scanline
-buffer. Each output has its own palette tables, line buffers, DMA channels,
-IRQ, and signal generator.
+An application does not have to hold a buffer of that shape. `graphics_set_mode()`
+picks a mode, and a shared composer turns a smaller application buffer into the
+320-index line the outputs need. Text is the one exception: it is 640 samples
+wide, which the [Modes](#modes) section covers.
+
+VGA and NTSC read the same source. They do not read the same scanline buffer.
+Each output has its own palette tables, line buffers, DMA channels, IRQ, and
+signal generator.
 
 The demo has three old-school scenes: a jumping ball, a rotating torus, and a
 3D helix. They are drawn over a wavy black-and-white perspective checkerboard.
@@ -47,8 +52,11 @@ The objects use six color ramps and crossfades.
                     |                    |
                PIO0 state machine       PWM
                     |                    |
-                GPIO 6..13             GPIO 27
+             GPIO 6..13 default     GPIO 27 default
 ```
+
+Both pin groups are defaults only: `VGA_BASE_PIN` and `NTSC_PIN_OUTPUT` move
+them.
 
 In the demo, core 0 starts the hardware and owns both DMA IRQ handlers. Core 1
 draws frames. The graphics library itself does not start core 1; that is done
@@ -89,11 +97,15 @@ The same public calls are used for VGA, NTSC, dual output, HDMI, and TFT:
   the selected output or outputs;
 - `graphics_set_palette()` makes the selected output palette entries from one
   RGB888 color;
-- `graphics_get_framebuffer()` returns the built-in 320 x 240 primary buffer;
+- `graphics_get_framebuffer()` returns the built-in 320 x 240 primary buffer, or
+  `NULL` when `GRAPHICS_BUILTIN_FRAMEBUFFER` is off;
 - `graphics_present_framebuffer()` sends a buffer-swap request to every
   selected output and waits until all have accepted it;
-- `graphics_set_buffer()` changes every selected active framebuffer pointer,
-  but only when width is 320 and height is 240.
+- `graphics_set_buffer()` always gives the composer the application buffer and
+  its size, and additionally changes each active scanout pointer when the size
+  is exactly 320 x 240, which is what keeps the direct path zero-copy;
+- `graphics_set_mode()` selects how the composer reads that buffer, and clears
+  it.
 
 `graphics_modes.c` in the same folder is the shared scanline composer. It holds
 the mode, the application buffer and its size, the offset, and the text-buffer
@@ -128,6 +140,13 @@ Text colors are the fixed 16 CGA colors. They do not go through
 `graphics_set_palette()`, so an application keeps all 256 of its own colors and
 cannot recolor text, exactly as in the older driver.
 
+`GRAPHICSMODE_DEFAULT` and the two `GG_*` modes mask every source byte with
+`0x1f`. This is what the older Master System driver did, because that emulator
+keeps a priority bit in the upper bits of each picture byte.
+
+`graphics_set_mode()` clears the application buffer, again as the older driver
+did. It does not select a signal: every mode uses the same VGA and NTSC timing.
+
 ### Text is 640 samples wide
 
 A graphics row is 320 indices and every output sends each one twice. Text does
@@ -159,34 +178,32 @@ In both fonts bit 0 of a glyph byte is the leftmost pixel.
 ### Text lookup tables
 
 Both text tables are built by the preprocessor from the fixed CGA colors, so
-they are `const` and cost no RAM at all:
+neither is computed at run time:
 
-| Table | Size | Use |
-|---|---:|---|
-| `vga_dual_text_pairs` | 2,048 B | attribute and two glyph bits to two VGA bus values |
-| `ntsc_text_sample` | 32 B | CGA color to one PWM luminance value |
+| Table | Size | Reads per line | Where | Use |
+|---|---:|---:|---|---|
+| `vga_dual_text_pairs` | 2,048 B | 320 | RAM | attribute and two glyph bits to two VGA bus values |
+| `font_8x16` | 4,096 B | 80 | flash | VGA glyph rows |
+| `font_8x8` | 2,048 B | 80 | flash | NTSC glyph rows |
+| `ntsc_text_sample` | 32 B | 0 | flash | CGA color to one PWM luminance value |
 
-VGA writes two pixels for each 16-bit store, so a text line costs four stores
-for each character cell.
+VGA writes two pixels for each 16-bit store, so a text line costs four table
+reads and four stores for each character cell.
 
-`vga_init()` copies the table and the 8x16 font into RAM, which costs 6 KB.
-They cannot be read from flash while the picture is live: a text line makes
-four table reads and one font read for each character cell, so 400 flash reads
-land inside one 31.7 us VGA line, and each one shares the single QSPI bus with
-whatever the other core is doing. The result was a shaking VGA text picture
-while NTSC stayed steady, because an NTSC line is twice as long and reads only
-the font. Every line builder, and the small mode helpers they call, are marked
-`__time_critical_func` for the same reason.
+`vga_init()` copies only `vga_dual_text_pairs` into RAM, which costs 2 KB —
+the same 2 KB the older driver spent on the same table. It is the one piece
+that cannot stay in flash: 320 reads land inside a single 31.7 us VGA line, and
+each shares the one QSPI bus with whatever the other core is running, so the
+stall is unbounded rather than merely slow. That showed as a shaking VGA text
+picture while NTSC stayed steady, an NTSC line being twice as long. The fonts
+are read an eighth as often and stay in flash for both outputs.
 
-The 6 KB is taken even by a build which never selects a text mode.
+Every line builder, and the small mode helpers they call, are marked
+`__time_critical_func` so the Pico SDK keeps them in RAM too.
 
 The RGB parts of the CGA set are only `0x00`, `0x55`, `0xaa`, or `0xff`. For
 those four values the lower and upper dither levels of `vga_set_palette()` are
 equal, so one bus value serves both frame phases and text never shimmers.
-
-`GRAPHICSMODE_DEFAULT` and the two `GG_*` modes mask every source byte with
-`0x1f`. This is what the older Master System driver did, because that emulator
-keeps a priority bit in the upper bits of each picture byte.
 
 ### `drivers/vga-nextgen`
 
@@ -197,15 +214,18 @@ This is a portable VGA module with the CMake target `vga-nextgen`.
 - `vga.h` gives its internal backend API;
 - `graphics.c` implements the public `graphics.h` API when VGA is used alone.
 
-Linking this target adds `VGA=1` to the final program. The old emulator-specific
-VGA driver and its large mode switch have been removed.
+Linking this target adds `VGA=1` to the final program. The old driver's large
+mode switch is gone; the shared composer holds that work now, and `vga.c` keeps
+only the two scanout loops it cannot share — the 320-index graphics line and the
+640-sample text line.
 
 The VGA resistor output has two bits for each RGB channel. By default,
-`VGA_ENABLE_DITHER=1` uses two 256-entry palette tables. The source-row and
-frame bits change the order of the two DAC samples, as in the old VGA driver.
-The phase is selected before the pixel loop; the loop still has one table read
-for each source pixel. Set `VGA_ENABLE_DITHER=0` at compile time to remove the
-second 512-byte table and all phase work.
+`VGA_ENABLE_DITHER=1` uses two 256-entry palette tables, 1,024 bytes together.
+The source-row and frame bits change the order of the two DAC samples, as in the
+old VGA driver. The phase is selected before the pixel loop; the loop still has
+one table read for each source pixel. Set `VGA_ENABLE_DITHER=0` at compile time
+to remove the second 512-byte table and all phase work. Text ignores the dither
+tables completely.
 
 ### `drivers/ntsc-tv`
 
@@ -441,10 +461,11 @@ defines the digital pin values and timing.
 
 ### VGA palette
 
-The VGA palette has 256 `uint16_t` entries and uses 512 bytes. One entry has
-two adjacent 8-bit VGA bus values. The two values use lower and upper 2-bit RGB
-levels. This gives a spatial two-sample approximation of the requested RGB888
-color while keeping the physical output at two bits per RGB channel.
+The VGA palette has 256 `uint16_t` entries for each dither phase, so 1,024 bytes
+by default and 512 bytes with `VGA_ENABLE_DITHER=0`. One entry has two adjacent
+8-bit VGA bus values. The two values use lower and upper 2-bit RGB levels. This
+gives a spatial two-sample approximation of the requested RGB888 color while
+keeping the physical output at two bits per RGB channel.
 
 The sync bits are set in every active palette value, so palette output cannot
 change sync state.
@@ -461,8 +482,13 @@ The total is 3,200 bytes for all four buffers.
 Only the 640-byte active area of an active buffer is changed for each source
 row. The sync and porch data come from the template copied during init.
 
-An active line buffer is sent twice. During the second physical line, the CPU
-makes the other active buffer for the next source row.
+In a graphics mode an active line buffer is sent twice. During the second
+physical line, the CPU makes the other active buffer for the next source row.
+
+A text mode has one source line for every physical line, so it cannot skip the
+odd ones: the handler builds a buffer on all 480 active lines. That halves the
+time available for one line and is why the text path is the tightest CPU path
+in the project.
 
 ### VGA DMA chain
 
@@ -501,9 +527,16 @@ are different.
 - NTSC loads four indices together and uses a two-group unroll. This is the
   smaller and quicker tested form for the Cortex-M33 output loop.
 
+The text loops are the same on both chips. VGA takes two pixels for each 16-bit
+store from the attribute table; NTSC writes one 16-bit sample for each pixel,
+which its longer line can afford.
+
 Both DMA handlers use `__time_critical_func`, so Pico SDK puts the hot IRQ code
-in RAM. `drivers/ntsc-tv/ntsc-tv.c` also asks GCC for `O3` on its code. The root
-build uses `O3`, LTO, whole-program work, function sections, and data sections.
+in RAM, and so do the composer entry points they call every line. Data that the
+handlers read every line has to be in RAM as well; see
+[Text lookup tables](#text-lookup-tables). `drivers/ntsc-tv/ntsc-tv.c` also asks
+GCC for `O3` on its code. The root build uses `O3`, LTO, whole-program work,
+function sections, and data sections.
 
 ## Framebuffer presentation
 
@@ -562,16 +595,23 @@ The default dual form takes or changes these chip resources:
 | DMA IRQ 0 | exclusive NTSC handler |
 | DMA IRQ 1 | exclusive VGA handler |
 | PIO | one program word and one state machine on PIO0 |
-| PWM | the slice/channel used by GPIO27 |
-| GPIO | GPIO27 and VGA GPIO6..13 |
+| PWM | the slice and channel of `NTSC_PIN_OUTPUT` |
+| GPIO | `NTSC_PIN_OUTPUT` and the eight VGA pins from `VGA_BASE_PIN` |
 | Core | IRQs enabled on the core which calls `graphics_init()` |
+
+The NTSC output takes a whole PWM slice: it sets that slice's wrap and divider
+for the sample clock. Nothing else can use either channel of the same slice. On
+RP2040 the slice is `(gpio >> 1) & 7`, so GPIO26 and GPIO27 share one slice, as
+do GPIO28 and GPIO29. The driver writes the low or high half of the slice's
+compare register to match an even or odd output pin.
 
 There is no deinit path. Claimed DMA channels, PIO state, IRQ handlers, and the
 PWM output stay active for the life of the program.
 
-VGA-only takes two DMA channels, DMA IRQ 1, one PIO state machine, and GPIO
-6..13. NTSC-only takes two DMA channels, DMA IRQ 0, one PWM slice/channel, and
-GPIO27. Only a form with NTSC changes the system clock and core voltage.
+VGA-only takes two DMA channels, DMA IRQ 1, one PIO state machine, and the eight
+VGA pins. NTSC-only takes two DMA channels, DMA IRQ 0, one PWM slice, and one
+GPIO. Only a form with NTSC changes the system clock and core voltage, and only
+when `GRAPHICS_NO_CLOCK_SETUP` is off.
 
 The exclusive IRQ handlers are important when this code is put into a larger
 program: another module cannot also install an exclusive handler on the same
@@ -583,20 +623,29 @@ The largest fixed blocks in the default dual demo are:
 
 | Block | Bytes |
 |---|---:|
-| Primary framebuffer | 76,800 |
+| Primary framebuffer, `GRAPHICS_BUILTIN_FRAMEBUFFER=ON` | 76,800 |
 | Demo backbuffer | 76,800 |
-| VGA line buffers | 3,200 |
+| Demo depth buffer | 16,384 |
 | NTSC line buffers | 3,632 |
-| VGA palette | 512 |
+| VGA line buffers | 3,200 |
 | NTSC palette, normal | 2,048 |
 | NTSC palette, `NTSC_LOW_RAM` | 512 |
-| Demo depth buffer | 16,384 |
+| VGA text attribute table | 2,048 |
+| VGA palette, `VGA_ENABLE_DITHER=1` | 1,024 |
+| VGA palette, `VGA_ENABLE_DITHER=0` | 512 |
+| VGA composer scratch line | 320 |
+| NTSC composer scratch line | 320 |
+| Shared blank line | 320 |
 
 The demo also has ball sprites, floor tables, wave tables, and small object
 tables. SDK state, stacks, and code-in-RAM add to the final RAM use.
 
+The VGA text attribute table is taken even by a build which never selects a text
+mode, because `vga_init()` fills it unconditionally.
+
 `NTSC_LOW_RAM` only changes the NTSC palette form. It does not remove either
-full framebuffer or the VGA line buffers.
+full framebuffer or the VGA line buffers. To drop the primary framebuffer, turn
+`GRAPHICS_BUILTIN_FRAMEBUFFER` off and give the drivers a buffer of your own.
 
 ## Current format and mode limits
 
@@ -630,8 +679,8 @@ current code limit if the NTSC vertical layout is changed.
 
 ## Build system
 
-The project uses CMake 3.21 or newer, Pico SDK, and C23. Four CMake options
-select the output modules:
+The project uses CMake 3.21 or newer, Pico SDK, and C23. The first four options
+select the output modules; the rest tune them:
 
 | CMake option | Default | Effect |
 |---|---:|---|
@@ -639,10 +688,16 @@ select the output modules:
 | `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
+| `NTSC_PIN_OUTPUT` | `27` | composite output GPIO |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
 | `NTSC_USE_SCRATCH_Y` | `OFF` | put NTSC palette tables in scratch Y |
 | `GRAPHICS_BUILTIN_FRAMEBUFFER` | `ON` | keep the static 320 x 240 buffer |
 | `GRAPHICS_NO_CLOCK_SETUP` | `OFF` | let the application own the system clock |
+
+Set `NTSC_PIN_OUTPUT` when GPIO27 is already taken, which it often is: sound
+hardware tends to sit on GPIO26 and GPIO27. A CMake value beats the header
+default, and any GPIO works, odd or even. Pick one whose PWM slice nothing else
+uses.
 
 Turn `GRAPHICS_BUILTIN_FRAMEBUFFER` off when the application gives its own
 picture buffer through `graphics_set_buffer()`. This drops 76,800 bytes of RAM
@@ -668,19 +723,25 @@ with VGA or NTSC, or if HDMI and TFT are both selected.
 
 ### Use in another project
 
-The NTSC module is self-contained under `drivers/ntsc-tv`. Copy that folder
-next to the existing `drivers/graphics` folder, then add:
+Copy `drivers/graphics` and `drivers/ntsc-tv` together, then add:
 
 ```cmake
+add_subdirectory(drivers/graphics)
 add_subdirectory(drivers/ntsc-tv)
 target_link_libraries(your_program PRIVATE graphics ntsc-tv-driver)
 ```
 
+Both output targets now link `graphics` themselves, because their scanline
+builders call the shared composer in `graphics_modes.c`. An older `drivers/
+graphics` folder will not do: it has no `graphics_modes.h`, no `font4x6.h`, and
+no `GRAPHICS_CGA_RGB`. Take this project's copy of both folders or neither.
+
 The interface target adds the source files, include path, Pico hardware
-libraries, and `NTSC_TV=1`. It also pre-includes `ntsc-tv.h`, so an older
-`graphics.h` can still get its display-size and `RGB888` definitions from the
-selected driver. Application code continues to include only `graphics.h` and
-use `graphics_init()`, `graphics_set_buffer()`, and `graphics_set_palette()`.
+libraries, and `NTSC_TV=1`. It also pre-includes `ntsc-tv.h`, so `graphics.h`
+gets its display-size and `RGB888` definitions from the selected driver.
+Application code continues to include only `graphics.h` and use
+`graphics_init()`, `graphics_set_buffer()`, `graphics_set_mode()`, and
+`graphics_set_palette()`.
 
 For dual output, also copy this project's refactored `drivers/vga-nextgen`
 folder, then add and link VGA:
@@ -728,9 +789,10 @@ The presets select:
 | `rp2040-tft` | `pico` | `rp2040` | Cortex-M0+ |
 | `rp2350-tft` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 
-Both use `MinSizeRel`, Ninja, UF2 output, VGA plus NTSC, normal NTSC palette
-RAM, and no scratch placement. The RP2350 preset also sets
-`PICO_NO_COPRO_DIS=ON`.
+All six use `MinSizeRel`, Ninja, UF2 output, normal NTSC palette RAM, and no
+scratch placement. `rp2040` and `rp2350` select VGA plus NTSC; the `-hdmi` and
+`-tft` presets turn both of those off and select their own single output. The
+two RP2350 presets also set `PICO_NO_COPRO_DIS=ON`.
 
 Picotool is fetched under:
 
@@ -752,14 +814,14 @@ The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or
 
 ### NTSC composite
 
-The default output pin is GPIO27.
+The default output pin is GPIO27; `NTSC_PIN_OUTPUT` moves it.
 
 ```text
-GPIO27 -- 75 ohm --+-- composite video out
-                   |
-                 560 pF
-                   |
-                  GND
+NTSC_PIN_OUTPUT -- 75 ohm --+-- composite video out
+                            |
+                          560 pF
+                            |
+                           GND
 ```
 
 The PWM duty values make the sync, blank, luminance, chroma, and color-burst
