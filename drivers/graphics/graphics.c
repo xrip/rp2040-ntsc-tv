@@ -53,7 +53,7 @@ void graphics_init(void) {
 #if defined(HDMI)
     hdmi_graphics_init();
 #elif defined(NTSC_TV)
-    ntsc_tv_graphics_init();
+    ntsc_composite_graphics_init();
 #elif defined(TFT)
     tft_graphics_init();
 #elif defined(VGA)

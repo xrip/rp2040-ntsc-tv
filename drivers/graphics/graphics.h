@@ -26,7 +26,7 @@ extern "C" {
 #include "vga.h"
 #endif
 #ifdef NTSC_TV
-#include "ntsc-tv.h"
+#include "ntsc-composite.h"
 #endif
 #ifdef TV
 #include "tv.h"

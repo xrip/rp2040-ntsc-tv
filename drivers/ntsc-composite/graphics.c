@@ -8,7 +8,7 @@
 
 #include <graphics_modes.h>
 
-#include "ntsc-tv.h"
+#include "ntsc-composite.h"
 
 #if defined(VGA)
 #include <vga.h>
@@ -28,7 +28,7 @@ static uint8_t graphics_framebuffer[GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT
 
 uint8_t *text_buffer = NULL;
 
-void ntsc_tv_graphics_init(void) {
+void ntsc_composite_graphics_init(void) {
     uint32_t start_mask = 0;
 
 #if defined(VGA)
@@ -41,8 +41,8 @@ void ntsc_tv_graphics_init(void) {
     tft_init(GRAPHICS_INITIAL_FRAMEBUFFER);
 #endif
 
-    ntsc_tv_init(GRAPHICS_INITIAL_FRAMEBUFFER);
-    start_mask |= ntsc_tv_start_mask();
+    ntsc_composite_init(GRAPHICS_INITIAL_FRAMEBUFFER);
+    start_mask |= ntsc_composite_start_mask();
 
     dma_start_channel_mask(start_mask);
 
@@ -62,7 +62,7 @@ void graphics_wait_vblank(void) {
 #if defined(VGA)
     vga_wait_vblank();
 #else
-    ntsc_tv_wait_vblank();
+    ntsc_composite_wait_vblank();
 #endif
 }
 
@@ -83,7 +83,7 @@ void graphics_set_buffer(uint8_t *buffer,
 #if defined(TFT)
     tft_set_framebuffer(buffer);
 #endif
-    ntsc_tv_set_framebuffer(buffer);
+    ntsc_composite_set_framebuffer(buffer);
 }
 
 void graphics_set_offset(const int x, const int y) {
@@ -97,7 +97,7 @@ void graphics_set_palette(const uint8_t index, const uint32_t color) {
 #if defined(TFT)
     tft_set_palette(index, color);
 #endif
-    ntsc_tv_set_palette(index, color);
+    ntsc_composite_set_palette(index, color);
 }
 
 void graphics_set_textbuffer(uint8_t *buffer) {
@@ -121,9 +121,9 @@ void graphics_present_framebuffer(const uint8_t *framebuffer) {
 #if defined(VGA)
     vga_request_framebuffer(framebuffer);
 #endif
-    ntsc_tv_request_framebuffer(framebuffer);
+    ntsc_composite_request_framebuffer(framebuffer);
 
-    ntsc_tv_wait_framebuffer();
+    ntsc_composite_wait_framebuffer();
 #if defined(VGA)
     vga_wait_framebuffer();
 #endif

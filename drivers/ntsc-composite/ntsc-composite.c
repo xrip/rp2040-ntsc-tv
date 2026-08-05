@@ -24,7 +24,7 @@ caused by using this program.
 #pragma GCC optimize ("O3")
 #endif
 
-#include "ntsc-tv.h"
+#include "ntsc-composite.h"
 
 #include <stddef.h>
 
@@ -128,13 +128,13 @@ static const uint16_t ntsc_text_sample[16] = {
 // 240 active lines / 8 = the 30 text rows of TEXTMODE_ROWS.
 #define NTSC_TEXT_FONT_HEIGHT 8
 
-void ntsc_tv_request_framebuffer(const uint8_t *framebuffer) {
+void ntsc_composite_request_framebuffer(const uint8_t *framebuffer) {
     // Publish all completed pixel writes before the IRQ sees the pointer.
     __mem_fence_release();
     ntsc_pending_framebuffer = framebuffer;
 }
 
-void ntsc_tv_wait_framebuffer(void) {
+void ntsc_composite_wait_framebuffer(void) {
     // The IRQ clears this only after switching buffers at a frame boundary.
     while (ntsc_pending_framebuffer != NULL) {
         tight_loop_contents();
@@ -142,11 +142,11 @@ void ntsc_tv_wait_framebuffer(void) {
     __mem_fence_acquire();
 }
 
-size_t ntsc_tv_current_line(void) {
+size_t ntsc_composite_current_line(void) {
     return ntsc_current_scanline;
 }
 
-void ntsc_tv_wait_vblank(void) {
+void ntsc_composite_wait_vblank(void) {
     // Return the moment the line counter runs backwards, which is the start of
     // a frame. Called from anywhere in a frame this waits at most one frame,
     // and it hands the caller the longest possible lead over the beam.
@@ -392,7 +392,7 @@ static void ntsc_set_color(const uint8_t palette_index, const uint8_t blue, cons
 #endif
 }
 
-void ntsc_tv_set_palette(const uint8_t index, const uint32_t color888) {
+void ntsc_composite_set_palette(const uint8_t index, const uint32_t color888) {
     const uint8_t red = (uint8_t)(color888 >> 16);
     const uint8_t green = (uint8_t)(color888 >> 8);
     const uint8_t blue = (uint8_t)color888;
@@ -400,7 +400,7 @@ void ntsc_tv_set_palette(const uint8_t index, const uint32_t color888) {
     ntsc_set_color(index, blue, red, green);
 }
 
-void ntsc_tv_set_framebuffer(const uint8_t *framebuffer) {
+void ntsc_composite_set_framebuffer(const uint8_t *framebuffer) {
     ntsc_active_framebuffer = framebuffer;
 }
 
@@ -435,10 +435,10 @@ static void __time_critical_func(ntsc_dma_irq_handler)() {
 
 
 /* ===========================================================================
- * Function: ntsc_tv_init
+ * Function: ntsc_composite_init
  * Purpose: Initialize the complete NTSC video generation system
  * =========================================================================== */
-void ntsc_tv_init(const uint8_t *framebuffer) {
+void ntsc_composite_init(const uint8_t *framebuffer) {
     const uint32_t pwm_period_cycles = 11;
 
     ntsc_active_framebuffer = framebuffer;
@@ -520,7 +520,7 @@ void ntsc_tv_init(const uint8_t *framebuffer) {
     irq_set_enabled(DMA_IRQ_0, true);
 }
 
-uint32_t ntsc_tv_start_mask(void) {
+uint32_t ntsc_composite_start_mask(void) {
     return 1u << ntsc_dma_chan_data;
 }
 #if defined(__GNUC__) && !defined(__clang__)

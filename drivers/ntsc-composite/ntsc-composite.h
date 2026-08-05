@@ -37,15 +37,15 @@ extern "C" {
 #define RGB888(r, g, b) ((r << 16) | (g << 8) | b)
 #endif
 
-void ntsc_tv_init(const uint8_t *framebuffer);
-void ntsc_tv_graphics_init(void);
-uint32_t ntsc_tv_start_mask(void);
-void ntsc_tv_set_framebuffer(const uint8_t *framebuffer);
-void ntsc_tv_request_framebuffer(const uint8_t *framebuffer);
-void ntsc_tv_wait_framebuffer(void);
-void ntsc_tv_set_palette(uint8_t index, uint32_t color888);
-size_t ntsc_tv_current_line(void);
-void ntsc_tv_wait_vblank(void);
+void ntsc_composite_init(const uint8_t *framebuffer);
+void ntsc_composite_graphics_init(void);
+uint32_t ntsc_composite_start_mask(void);
+void ntsc_composite_set_framebuffer(const uint8_t *framebuffer);
+void ntsc_composite_request_framebuffer(const uint8_t *framebuffer);
+void ntsc_composite_wait_framebuffer(void);
+void ntsc_composite_set_palette(uint8_t index, uint32_t color888);
+size_t ntsc_composite_current_line(void);
+void ntsc_composite_wait_vblank(void);
 
 #ifdef __cplusplus
 }

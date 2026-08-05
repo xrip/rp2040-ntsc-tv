@@ -246,13 +246,13 @@ one table read for each source pixel. Set `VGA_ENABLE_DITHER=0` at compile time
 to remove the second 512-byte table and all phase work. Text ignores the dither
 tables completely.
 
-### `drivers/ntsc-tv`
+### `drivers/ntsc-composite`
 
-This is a portable NTSC module with the CMake target `ntsc-tv-driver`.
+This is a portable NTSC module with the CMake target `ntsc-composite`.
 
-- `ntsc-tv.c` owns the PWM, DMA, IRQ, scanline buffers, palette tables, and
-  framebuffer pointers;
-- `ntsc-tv.h` gives its internal backend API and the default GPIO setting;
+- `ntsc-composite.c` owns the PWM, DMA, IRQ, scanline buffers, palette
+  tables, and framebuffer pointers;
+- `ntsc-composite.h` gives its internal backend API and the default GPIO setting;
 - `graphics.c` implements the public `graphics.h` API for NTSC-only and dual
   output.
 
@@ -562,8 +562,8 @@ which its longer line can afford.
 Both DMA handlers use `__time_critical_func`, so Pico SDK puts the hot IRQ code
 in RAM, and so do the composer entry points they call every line. Data that the
 handlers read every line has to be in RAM as well; see
-[Text lookup tables](#text-lookup-tables). `drivers/ntsc-tv/ntsc-tv.c` also asks
-GCC for `O3` on its code. The root build uses `O3`, LTO, whole-program work,
+[Text lookup tables](#text-lookup-tables).
+`drivers/ntsc-composite/ntsc-composite.c` also asks GCC for `O3` on its code. The root build uses `O3`, LTO, whole-program work,
 function sections, and data sections.
 
 ## Framebuffer presentation
@@ -727,7 +727,7 @@ select the output modules; the rest tune them:
 | CMake option | Default | Effect |
 |---|---:|---|
 | `VGA` | `ON` | link `vga` and set `VGA=1` |
-| `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
+| `NTSC_TV` | `ON` | link `ntsc-composite` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_PIN_OUTPUT` | `28` | composite output GPIO |
@@ -756,7 +756,7 @@ This gives five supported forms:
 | Form | CMake values | Driver targets |
 |---|---|---|
 | VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga` |
-| NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-tv-driver` |
+| NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-composite` |
 | Dual | `VGA=ON`, `NTSC_TV=ON` | all three targets |
 | HDMI | `HDMI=ON`, all other outputs off | `graphics`, `hdmi` |
 | TFT | `TFT=ON`, all other outputs off | `graphics`, `st7789` |
@@ -766,12 +766,12 @@ with VGA or NTSC, or if HDMI and TFT are both selected.
 
 ### Use in another project
 
-Copy `drivers/graphics` and `drivers/ntsc-tv` together, then add:
+Copy `drivers/graphics` and `drivers/ntsc-composite` together, then add:
 
 ```cmake
 add_subdirectory(drivers/graphics)
-add_subdirectory(drivers/ntsc-tv)
-target_link_libraries(your_program PRIVATE graphics ntsc-tv-driver)
+add_subdirectory(drivers/ntsc-composite)
+target_link_libraries(your_program PRIVATE graphics ntsc-composite)
 ```
 
 Both output targets now link `graphics` themselves, because their scanline
@@ -780,8 +780,8 @@ graphics` folder will not do: it has no `graphics_modes.h`, no `font4x6.h`, and
 no `GRAPHICS_CGA_RGB`. Take this project's copy of both folders or neither.
 
 The interface target adds the source files, include path, Pico hardware
-libraries, and `NTSC_TV=1`. It also pre-includes `ntsc-tv.h`, so `graphics.h`
-gets its display-size and `RGB888` definitions from the selected driver.
+libraries, and `NTSC_TV=1`. It also pre-includes `ntsc-composite.h`, so
+`graphics.h` gets its display-size and `RGB888` definitions from the selected driver.
 Application code continues to include only `graphics.h` and use
 `graphics_init()`, `graphics_set_buffer()`, `graphics_set_mode()`, and
 `graphics_set_palette()`.
@@ -794,7 +794,7 @@ add_subdirectory(drivers/vga)
 target_link_libraries(your_program PRIVATE
         graphics
         vga
-        ntsc-tv-driver
+        ntsc-composite
 )
 ```
 
@@ -803,7 +803,7 @@ definitions select the dual graphics adapter automatically.
 
 The old multi-mode VGA driver cannot be used in this dual form because it owns
 the same public `graphics_*` names. NTSC-only use needs only the new
-`drivers/ntsc-tv` folder.
+`drivers/ntsc-composite` folder.
 
 `pico_add_extra_outputs()` makes ELF, BIN, HEX, disassembly, and UF2 output.
 
