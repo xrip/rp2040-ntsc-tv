@@ -9,8 +9,10 @@ available: VGA, color composite NTSC, HDMI, and an ST7789 TFT. VGA and NTSC can
 run at the same time; HDMI and TFT are single-output forms. It builds for both
 RP2040 and RP2350.
 
-The demo in the root `ntsc-tv.c` draws a jumping ball, a rotating torus, and a
-3D helix over a wavy perspective checkerboard. The display drivers live under
+The demo in the root `ntsc-tv.c` has two parts and swaps between them: a
+graphics part with a jumping ball, a rotating torus, and a 3D helix over a wavy
+perspective checkerboard, and a text part with a DOOM block-character logo over
+the DOOM fire, drawn with CP437 shade characters. The display drivers live under
 `drivers/`, and `README.md` is the detailed reference for them.
 
 ## Key Technologies

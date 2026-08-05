@@ -25,9 +25,21 @@ VGA and NTSC read the same source. They do not read the same scanline buffer.
 Each output has its own palette tables, line buffers, DMA channels, IRQ, and
 signal generator.
 
-The demo has three old-school scenes: a jumping ball, a rotating torus, and a
-3D helix. They are drawn over a wavy black-and-white perspective checkerboard.
-The objects use six color ramps and crossfades.
+The demo runs in two parts and swaps between them.
+
+The graphics part has three old-school scenes: a jumping ball, a rotating torus,
+and a 3D helix. They are drawn over a wavy black-and-white perspective
+checkerboard. The objects use six color ramps and crossfades.
+
+The text part is an old DOS demo screen: the word DOOM in block characters, with
+the DOOM fire burning underneath it. The fire runs one cell for one character
+over the whole 80 x 30 screen, and gets sixteen steps of heat out of six CGA
+colors by drawing the CP437 shade characters over a darker background. It is
+also the one part of the demo that exercises a text mode.
+
+The HDMI and TFT builds run the graphics part alone. Those two outputs scan the
+framebuffer straight out and ignore `graphics_set_mode()`, so a text part would
+only freeze the picture. The whole text part is compiled out of them.
 
 ## Dual VGA and NTSC system map
 
@@ -73,8 +85,15 @@ This is the application and demo layer. It:
 - draws a complete frame into a backbuffer;
 - asks the graphics layer to present that buffer;
 - changes the draw buffer after both outputs accept the request;
+- runs the fire and the block-character logo of the text part;
+- calls `graphics_set_mode()` to swap between the two parts;
 - runs the renderer on core 1;
 - leaves core 0 free for the VGA and NTSC IRQ work.
+
+The text part has no back buffer. It writes the one text buffer while scanout
+reads it, and the frame sleep is its only pacing. A tear in moving flames cannot
+be seen and the logo does not move, so a second 4,800-byte buffer would buy
+nothing.
 
 The renderer uses two full framebuffers:
 
@@ -635,6 +654,8 @@ The largest fixed blocks in the default dual demo are:
 | Primary framebuffer, `GRAPHICS_BUILTIN_FRAMEBUFFER=ON` | 76,800 |
 | Demo backbuffer | 76,800 |
 | Demo depth buffer | 16,384 |
+| Demo text buffer | 4,800 |
+| Demo fire grid | 2,400 |
 | NTSC line buffers | 3,632 |
 | VGA line buffers | 3,200 |
 | NTSC palette, normal | 2,048 |

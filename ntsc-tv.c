@@ -41,7 +41,33 @@ enum {
     DEMO_OBJECT_HALF = DEMO_OBJECT_SIZE / 2,
     DEMO_TORUS_MAJOR_STEPS = 64,
     DEMO_TORUS_MINOR_STEPS = 24,
-    DEMO_HELIX_POINTS = 384
+    DEMO_HELIX_POINTS = 384,
+
+    // Text part: the old DOS demo fire, drawn with CP437 shade characters.
+    DEMO_TEXT_FRAMES = 300,
+    DEMO_GRAPHICS_FRAMES = DEMO_SCENE_FRAMES * DEMO_SCENE_COUNT,
+    DEMO_FIRE_WIDTH = TEXTMODE_COLS,
+    DEMO_FIRE_HEIGHT = TEXTMODE_ROWS,
+    // Heat falls by 3..6 for each row up, so 63 carries the flames about
+    // fourteen rows and they die out below the logo.
+    DEMO_FIRE_HOTTEST = 63,
+    DEMO_FIRE_DECAY_MIN = 3,
+
+    DEMO_LOGO_ROWS = 7,
+    DEMO_LOGO_COLS = 7,
+    DEMO_LOGO_LETTERS = 4,
+    DEMO_LOGO_GAP = 2,
+    DEMO_LOGO_ADVANCE = DEMO_LOGO_COLS + DEMO_LOGO_GAP,
+    DEMO_LOGO_WIDTH = DEMO_LOGO_LETTERS * DEMO_LOGO_ADVANCE - DEMO_LOGO_GAP,
+    DEMO_LOGO_LEFT = (TEXTMODE_COLS - DEMO_LOGO_WIDTH) / 2,
+    DEMO_LOGO_TOP = 7
+};
+
+enum {
+    DEMO_CHAR_LIGHT_SHADE = 0xb0,
+    DEMO_CHAR_MEDIUM_SHADE = 0xb1,
+    DEMO_CHAR_DARK_SHADE = 0xb2,
+    DEMO_CHAR_FULL_BLOCK = 0xdb
 };
 
 typedef struct {
@@ -633,18 +659,175 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Text part
+ * ------------------------------------------------------------------------ */
+
+// HDMI and TFT scan the framebuffer straight out and ignore graphics_set_mode(),
+// so for them a text part would only freeze the picture. Those builds run the
+// graphics part alone, and the linker drops everything below.
+#if defined(HDMI) || defined(TFT)
+#define DEMO_HAS_TEXT_PART 0
+#else
+#define DEMO_HAS_TEXT_PART 1
+#endif
+
+#if DEMO_HAS_TEXT_PART
+
+static uint8_t demo_text_buffer[TEXTMODE_COLS * TEXTMODE_ROWS * 2];
+static uint8_t demo_fire[DEMO_FIRE_WIDTH * DEMO_FIRE_HEIGHT];
+
+// Sixteen steps of heat. Each is a character and an attribute, `background << 4
+// | foreground`. A shade character over a darker background gives three steps
+// between one solid color and the next, so sixteen steps come out of six CGA
+// colors: black, red, light red, yellow, white.
+static constexpr uint8_t demo_fire_ramp[16][2] = {
+        {' ',                    0x00},
+        {DEMO_CHAR_LIGHT_SHADE,  0x04},
+        {DEMO_CHAR_MEDIUM_SHADE, 0x04},
+        {DEMO_CHAR_DARK_SHADE,   0x04},
+        {DEMO_CHAR_FULL_BLOCK,   0x04},
+        {DEMO_CHAR_LIGHT_SHADE,  0x4c},
+        {DEMO_CHAR_MEDIUM_SHADE, 0x4c},
+        {DEMO_CHAR_DARK_SHADE,   0x4c},
+        {DEMO_CHAR_FULL_BLOCK,   0x0c},
+        {DEMO_CHAR_LIGHT_SHADE,  0xce},
+        {DEMO_CHAR_MEDIUM_SHADE, 0xce},
+        {DEMO_CHAR_DARK_SHADE,   0xce},
+        {DEMO_CHAR_FULL_BLOCK,   0x0e},
+        {DEMO_CHAR_LIGHT_SHADE,  0xef},
+        {DEMO_CHAR_DARK_SHADE,   0xef},
+        {DEMO_CHAR_FULL_BLOCK,   0x0f}
+};
+
+// D O O M, seven rows of seven columns, highest bit leftmost.
+static constexpr uint8_t demo_logo[DEMO_LOGO_LETTERS][DEMO_LOGO_ROWS] = {
+        {0b1111100, 0b1000010, 0b1000001, 0b1000001, 0b1000001, 0b1000010, 0b1111100},
+        {0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b0111110},
+        {0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b0111110},
+        {0b1000001, 0b1100011, 0b1010101, 0b1001001, 0b1000001, 0b1000001, 0b1000001}
+};
+
+// Hot metal: white at the top edge, cooling to red at the base.
+static constexpr uint8_t demo_logo_shade[DEMO_LOGO_ROWS] = {15, 15, 14, 14, 12, 12, 4};
+
+static uint32_t demo_random_state = 0x2545f491u;
+
+static inline uint32_t demo_random(void) {
+    uint32_t value = demo_random_state;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    demo_random_state = value;
+    return value;
+}
+
+static void demo_fire_step(void) {
+    // The bottom row feeds the flames. Cooling it now and then keeps the base
+    // from looking like a flat wall.
+    uint8_t *const base = &demo_fire[(DEMO_FIRE_HEIGHT - 1) * DEMO_FIRE_WIDTH];
+    for (unsigned x = 0; x < DEMO_FIRE_WIDTH; ++x) {
+        const uint32_t noise = demo_random();
+        base[x] = (noise & 7u) != 0u
+                  ? DEMO_FIRE_HOTTEST
+                  : (uint8_t)(DEMO_FIRE_HOTTEST - (noise >> 8 & 31u));
+    }
+
+    // Carry each cell one row up, losing heat and drifting sideways. This is
+    // the DOOM fire, one cell for one character.
+    for (unsigned y = DEMO_FIRE_HEIGHT - 1; y > 0; --y) {
+        const uint8_t *const source = &demo_fire[y * DEMO_FIRE_WIDTH];
+        uint8_t *const target = &demo_fire[(y - 1) * DEMO_FIRE_WIDTH];
+        for (unsigned x = 0; x < DEMO_FIRE_WIDTH; ++x) {
+            const uint32_t noise = demo_random();
+            const unsigned drift = noise & 3u;
+            const unsigned decay = drift + DEMO_FIRE_DECAY_MIN;
+            const uint8_t heat = source[x];
+
+            int column = (int)x + 1 - (int)drift;
+            if (column < 0) {
+                column = 0;
+            } else if (column >= DEMO_FIRE_WIDTH) {
+                column = DEMO_FIRE_WIDTH - 1;
+            }
+            target[column] = heat > decay ? (uint8_t)(heat - decay) : 0u;
+        }
+    }
+}
+
+static void demo_fire_draw(uint8_t *const text) {
+    for (unsigned cell = 0; cell < DEMO_FIRE_WIDTH * DEMO_FIRE_HEIGHT; ++cell) {
+        const uint8_t *const step = demo_fire_ramp[demo_fire[cell] >> 2];
+        text[cell * 2] = step[0];
+        text[cell * 2 + 1] = step[1];
+    }
+}
+
+static void demo_logo_draw(uint8_t *const text) {
+    for (unsigned row = 0; row < DEMO_LOGO_ROWS; ++row) {
+        uint8_t *const line = &text[(DEMO_LOGO_TOP + row) * TEXTMODE_COLS * 2];
+        const uint8_t attribute = demo_logo_shade[row];
+
+        for (unsigned letter = 0; letter < DEMO_LOGO_LETTERS; ++letter) {
+            const uint8_t bits = demo_logo[letter][row];
+            const unsigned left = DEMO_LOGO_LEFT + letter * DEMO_LOGO_ADVANCE;
+
+            for (unsigned column = 0; column < DEMO_LOGO_COLS; ++column) {
+                if ((bits >> (DEMO_LOGO_COLS - 1 - column) & 1u) == 0u) {
+                    continue;
+                }
+                line[(left + column) * 2] = DEMO_CHAR_FULL_BLOCK;
+                line[(left + column) * 2 + 1] = attribute;
+            }
+        }
+    }
+}
+
+static void demo_render_text_frame(void) {
+    demo_fire_step();
+    demo_fire_draw(demo_text_buffer);
+    demo_logo_draw(demo_text_buffer);
+}
+
+#endif // DEMO_HAS_TEXT_PART
+
 [[noreturn]] static void core1_entry(void) {
     uint32_t frame = 0;
     uint8_t *const primary_buffer = graphics_get_framebuffer();
     uint8_t *draw_buffer = demo_backbuffer;
     absolute_time_t next_frame = get_absolute_time();
+#if DEMO_HAS_TEXT_PART
+    uint32_t part_frame = 0;
+    bool text_part = true;
+
+    graphics_set_textbuffer(demo_text_buffer);
+    demo_render_text_frame();
+    graphics_set_mode(TEXTMODE_DEFAULT);
+#endif
 
     while (true) {
-        demo_render_frame(draw_buffer, frame++);
-        graphics_present_framebuffer(draw_buffer);
-        draw_buffer = draw_buffer == demo_backbuffer
-                      ? primary_buffer
-                      : demo_backbuffer;
+#if DEMO_HAS_TEXT_PART
+        if (text_part) {
+            // Text has no back buffer, so the sleep below is the only pacing.
+            // A tear in the flames cannot be seen and the logo does not move.
+            demo_render_text_frame();
+        } else
+#endif
+        {
+            demo_render_frame(draw_buffer, frame++);
+            graphics_present_framebuffer(draw_buffer);
+            draw_buffer = draw_buffer == demo_backbuffer
+                          ? primary_buffer
+                          : demo_backbuffer;
+        }
+
+#if DEMO_HAS_TEXT_PART
+        if (++part_frame >= (text_part ? DEMO_TEXT_FRAMES : DEMO_GRAPHICS_FRAMES)) {
+            part_frame = 0;
+            text_part = !text_part;
+            graphics_set_mode(text_part ? TEXTMODE_DEFAULT : VGA_320x240x256);
+        }
+#endif
 
         next_frame = delayed_by_ms(next_frame, DEMO_FRAME_TIME_MS);
         if (absolute_time_diff_us(get_absolute_time(), next_frame) > 0) {
