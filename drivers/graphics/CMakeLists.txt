@@ -26,7 +26,7 @@ if (GRAPHICS_NO_CLOCK_SETUP)
 endif()
 
 #target_link_libraries(graphics INTERFACE
-#vga-nextgen
+#vga
 #hdmi
 #tft
 #)

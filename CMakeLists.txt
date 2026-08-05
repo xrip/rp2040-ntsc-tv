@@ -50,7 +50,7 @@ if (HDMI AND TFT)
 endif()
 
 if (VGA)
-    add_subdirectory(drivers/vga-nextgen)
+    add_subdirectory(drivers/vga)
 endif()
 if (NTSC_TV)
     add_subdirectory(drivers/ntsc-tv)
@@ -102,7 +102,7 @@ target_link_libraries(${PROJECT_NAME}
 )
 
 if (VGA)
-    target_link_libraries(${PROJECT_NAME} vga-nextgen)
+    target_link_libraries(${PROJECT_NAME} vga)
     if (RGBS)
         set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-rgbs")
     endif()

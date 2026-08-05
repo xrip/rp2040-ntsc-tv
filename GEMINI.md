@@ -60,7 +60,7 @@ Build output, including the `.uf2` file, is written to
 ## Development Conventions
 
 *   C, following Raspberry Pi Pico SDK conventions.
-*   Signal generation (`drivers/vga-nextgen`, `drivers/ntsc-tv`,
+*   Signal generation (`drivers/vga`, `drivers/ntsc-tv`,
     `drivers/hdmi`, `drivers/st7789`) is kept separate from application logic
     (`ntsc-tv.c`). Mode handling shared by the outputs lives in
     `drivers/graphics/graphics_modes.c`.

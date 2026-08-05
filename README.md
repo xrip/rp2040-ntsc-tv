@@ -224,9 +224,9 @@ The RGB parts of the CGA set are only `0x00`, `0x55`, `0xaa`, or `0xff`. For
 those four values the lower and upper dither levels of `vga_set_palette()` are
 equal, so one bus value serves both frame phases and text never shimmers.
 
-### `drivers/vga-nextgen`
+### `drivers/vga`
 
-This is a portable VGA module with the CMake target `vga-nextgen`.
+This is a portable VGA module with the CMake target `vga`.
 
 - `vga.c` is the optimized fixed 640 x 480 VGA scanout for a 320 x 240 indexed
   source;
@@ -726,7 +726,7 @@ select the output modules; the rest tune them:
 
 | CMake option | Default | Effect |
 |---|---:|---|
-| `VGA` | `ON` | link `vga-nextgen` and set `VGA=1` |
+| `VGA` | `ON` | link `vga` and set `VGA=1` |
 | `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
@@ -755,7 +755,7 @@ This gives five supported forms:
 
 | Form | CMake values | Driver targets |
 |---|---|---|
-| VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga-nextgen` |
+| VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga` |
 | NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-tv-driver` |
 | Dual | `VGA=ON`, `NTSC_TV=ON` | all three targets |
 | HDMI | `HDMI=ON`, all other outputs off | `graphics`, `hdmi` |
@@ -786,14 +786,14 @@ Application code continues to include only `graphics.h` and use
 `graphics_init()`, `graphics_set_buffer()`, `graphics_set_mode()`, and
 `graphics_set_palette()`.
 
-For dual output, also copy this project's refactored `drivers/vga-nextgen`
+For dual output, also copy this project's refactored `drivers/vga`
 folder, then add and link VGA:
 
 ```cmake
-add_subdirectory(drivers/vga-nextgen)
+add_subdirectory(drivers/vga)
 target_link_libraries(your_program PRIVATE
         graphics
-        vga-nextgen
+        vga
         ntsc-tv-driver
 )
 ```
