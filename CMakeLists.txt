@@ -49,9 +49,15 @@ if (TFT)
 endif()
 add_subdirectory(drivers/graphics)
 
-#add_compile_options(-ffunction-sections -fdata-sections -fms-extensions -O3)
-add_compile_options(-flto -fwhole-program -ffunction-sections -fdata-sections -fms-extensions -O3)
-add_link_options(-flto -fwhole-program)
+# No -fwhole-program here. It tells the compiler that the file it is reading is
+# the whole program, so every symbol but main may be made static. These options
+# reach each file on its own, so each one believed it was alone: nothing inside
+# graphics_modes.c calls graphics_source_set_mode(), so the function was dropped
+# as dead and the calls from the other files folded away. graphics_set_mode()
+# then did nothing and text mode never came on. -flto already does this analysis
+# across files, and the GCC manual says not to put the two together.
+add_compile_options(-flto -ffunction-sections -fdata-sections -fms-extensions -O3)
+add_link_options(-flto)
 
 add_executable(${PROJECT_NAME})
 
