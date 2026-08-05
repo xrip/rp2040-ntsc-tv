@@ -47,6 +47,9 @@ static const uint8_t *graphics_framebuffer;
 static uint8_t tft_staging[SCREEN_WIDTH] __attribute__((aligned(4)));
 
 // 240 panel lines / 8 = the 30 text rows, and 320 pixels / 8 = 40 columns.
+// The panel has no frame rate of its own, so the timer stands in for one.
+#define TFT_FRAME_PERIOD_US 16667
+
 #define TFT_TEXT_FONT_HEIGHT 8
 #define TFT_TEXT_COLUMNS (SCREEN_WIDTH / 8)
 
@@ -265,8 +268,22 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
 }
 
 void graphics_wait_vblank(void) {
-    // The panel holds its own frame memory and is pushed a whole frame at a
-    // time, so there is no beam here to stay in front of.
+    // The panel holds its own frame memory and takes a whole frame at a time,
+    // so there is no beam to stay in front of. An application still needs a
+    // frame clock, though, so this paces on the timer at the same rate the
+    // other outputs run, rather than returning at once and letting the caller
+    // free-run.
+    static uint64_t next_frame;
+    const uint64_t now = time_us_64();
+
+    if (next_frame <= now) {
+        next_frame = now;   // fell behind: take the current time as the mark
+    }
+    next_frame += TFT_FRAME_PERIOD_US;
+
+    while (time_us_64() < next_frame) {
+        tight_loop_contents();
+    }
 }
 
 void graphics_set_buffer(uint8_t *buffer,

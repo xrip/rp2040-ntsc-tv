@@ -192,9 +192,12 @@ static inline uint8_t hdmi_color_code(const uint8_t index) {
     return index;
 }
 
+// The line now going out. Read from the other core, so it is volatile.
+static volatile uint16_t hdmi_current_scanline;
+
 static void __time_critical_func(hdmi_scanline_interrupt_handler)(void) {
     static uint8_t buffer_index;
-    static uint16_t current_scanline;
+    uint16_t current_scanline = hdmi_current_scanline;
 
     dma_hw->ints0 = 1u << dma_channel_control;
     dma_channel_set_read_addr(
@@ -206,6 +209,7 @@ static void __time_critical_func(hdmi_scanline_interrupt_handler)(void) {
     if (current_scanline == HDMI_TOTAL_SCANLINES) {
         current_scanline = 0;
     }
+    hdmi_current_scanline = current_scanline;
 
     if (current_scanline == 0) {
         const uint8_t *next_framebuffer = pending_framebuffer;
@@ -487,8 +491,18 @@ void graphics_set_mode(const enum graphics_mode_t mode) {
 }
 
 void graphics_wait_vblank(void) {
-    // Not wired up here yet. A caller which needs it gets no pacing rather
-    // than a wrong one.
+    // Return the moment the line counter runs backwards, which is the start of
+    // a frame. Called from anywhere in a frame this waits at most one frame,
+    // and it hands the caller the longest possible lead over the beam.
+    uint16_t previous = hdmi_current_scanline;
+    while (true) {
+        const uint16_t line = hdmi_current_scanline;
+        if (line < previous) {
+            return;
+        }
+        previous = line;
+        tight_loop_contents();
+    }
 }
 
 void graphics_set_palette(const uint8_t index, const uint32_t color888) {
