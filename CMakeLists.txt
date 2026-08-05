@@ -27,9 +27,18 @@ if (NOT VGA AND NOT NTSC_TV AND NOT HDMI AND NOT TFT)
     message(FATAL_ERROR "Enable at least one video output: VGA, NTSC_TV, HDMI, or TFT")
 endif()
 
-if ((HDMI OR TFT) AND (VGA OR NTSC_TV))
-    message(FATAL_ERROR "HDMI and TFT are single-output forms; disable VGA and NTSC_TV")
+if (HDMI AND (VGA OR NTSC_TV))
+    message(FATAL_ERROR "HDMI is a single-output form; disable VGA and NTSC_TV")
 endif()
+
+# The panel sits on GPIO 6, 8, 9, 10, 12 and 13, which is the VGA range.
+if (TFT AND VGA)
+    message(FATAL_ERROR "TFT and VGA want the same pins; select one of them")
+endif()
+
+# TFT with NTSC is allowed. The panel needs GPIO 6..13 and PIO0, composite
+# needs GPIO28 and a PWM slice, and the panel is pushed a frame at a time
+# rather than from an interrupt, so the two do not get in each other's way.
 
 if (HDMI AND TFT)
     message(FATAL_ERROR "Select HDMI or TFT, not both")
@@ -99,7 +108,11 @@ if (HDMI)
 endif()
 if (TFT)
     target_link_libraries(${PROJECT_NAME} st7789)
-    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-tft")
+    if (NTSC_TV)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-tft-composite")
+    else()
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-tft")
+    endif()
 endif()
 
 target_link_options(${PROJECT_NAME} PRIVATE -Xlinker --print-memory-usage --data-sections --function-sections)

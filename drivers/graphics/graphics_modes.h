@@ -51,6 +51,12 @@ extern "C" {
     GRAPHICS_TEXT_NIBBLE(X, 12) GRAPHICS_TEXT_NIBBLE(X, 13) \
     GRAPHICS_TEXT_NIBBLE(X, 14) GRAPHICS_TEXT_NIBBLE(X, 15)
 
+// Repeats a macro for the 16 CGA colors. A text renderer uses it to build its
+// own color table at compile time, in whatever form its hardware wants.
+#define GRAPHICS_TEXT_COLORS(X) \
+    X(0)  X(1)  X(2)  X(3)  X(4)  X(5)  X(6)  X(7) \
+    X(8)  X(9)  X(10) X(11) X(12) X(13) X(14) X(15)
+
 #define GRAPHICS_TEXT_NIBBLE(X, background) \
     X(0, background)  X(1, background)  X(2, background)  X(3, background) \
     X(4, background)  X(5, background)  X(6, background)  X(7, background) \

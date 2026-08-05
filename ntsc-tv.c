@@ -663,10 +663,12 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
  * Text part
  * ------------------------------------------------------------------------ */
 
-// HDMI and TFT scan the framebuffer straight out and ignore graphics_set_mode(),
-// so for them a text part would only freeze the picture. Those builds run the
-// graphics part alone, and the linker drops everything below.
-#if defined(HDMI) || defined(TFT)
+// HDMI scans the framebuffer straight out and ignores graphics_set_mode(), so
+// for it a text part would only freeze the picture. That build runs the
+// graphics part alone, and the linker drops everything below. TFT reads the
+// mode, though it is 40 columns wide, so the right-hand half of each row falls
+// off the panel.
+#if defined(HDMI)
 #define DEMO_HAS_TEXT_PART 0
 #else
 #define DEMO_HAS_TEXT_PART 1

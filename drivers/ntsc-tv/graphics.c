@@ -14,6 +14,10 @@
 #include <vga.h>
 #endif
 
+#if defined(TFT)
+#include <st7789.h>
+#endif
+
 #if defined(GRAPHICS_NO_BUILTIN_FRAMEBUFFER)
 #define GRAPHICS_INITIAL_FRAMEBUFFER NULL
 #else
@@ -30,6 +34,11 @@ void ntsc_tv_graphics_init(void) {
 #if defined(VGA)
     vga_init(GRAPHICS_INITIAL_FRAMEBUFFER);
     start_mask |= vga_start_mask();
+#endif
+
+#if defined(TFT)
+    // The panel is pushed a frame at a time, so it needs no DMA start mask.
+    tft_init(GRAPHICS_INITIAL_FRAMEBUFFER);
 #endif
 
     ntsc_tv_init(GRAPHICS_INITIAL_FRAMEBUFFER);
@@ -60,6 +69,9 @@ void graphics_set_buffer(uint8_t *buffer,
 #if defined(VGA)
     vga_set_framebuffer(buffer);
 #endif
+#if defined(TFT)
+    tft_set_framebuffer(buffer);
+#endif
     ntsc_tv_set_framebuffer(buffer);
 }
 
@@ -70,6 +82,9 @@ void graphics_set_offset(const int x, const int y) {
 void graphics_set_palette(const uint8_t index, const uint32_t color) {
 #if defined(VGA)
     vga_set_palette(index, color);
+#endif
+#if defined(TFT)
+    tft_set_palette(index, color);
 #endif
     ntsc_tv_set_palette(index, color);
 }
@@ -100,6 +115,12 @@ void graphics_present_framebuffer(const uint8_t *framebuffer) {
     ntsc_tv_wait_framebuffer();
 #if defined(VGA)
     vga_wait_framebuffer();
+#endif
+#if defined(TFT)
+    // Pushing the panel blocks, so it goes last, after the scanout drivers
+    // have taken the new buffer.
+    tft_set_framebuffer(framebuffer);
+    refresh_lcd();
 #endif
 }
 

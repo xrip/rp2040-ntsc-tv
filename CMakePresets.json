@@ -81,6 +81,17 @@
       }
     },
     {
+      "name": "rp2040-tft-ntsc",
+      "displayName": "RP2040 / TFT + NTSC",
+      "inherits": "rp2040",
+      "binaryDir": "${sourceDir}/cmake-build-rp2040-tft-ntsc",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "ON",
+        "TFT": "ON"
+      }
+    },
+    {
       "name": "rp2350-tft",
       "displayName": "RP2350 / TFT",
       "inherits": "rp2350",
@@ -88,6 +99,17 @@
       "cacheVariables": {
         "VGA": "OFF",
         "NTSC_TV": "OFF",
+        "TFT": "ON"
+      }
+    },
+    {
+      "name": "rp2350-tft-ntsc",
+      "displayName": "RP2350 / TFT + NTSC",
+      "inherits": "rp2350",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-tft-ntsc",
+      "cacheVariables": {
+        "VGA": "OFF",
+        "NTSC_TV": "ON",
         "TFT": "ON"
       }
     }

@@ -31,14 +31,29 @@ extern "C" {
 #define TFT_DC_PIN 10
 #endif
 
+// The panel is 320 x 240 and the text font is 8 x 8, so it holds 40 columns of
+// 30 rows. A build which also drives NTSC keeps that driver's wider buffer,
+// because the header it pre-includes sets these first; the panel then shows the
+// left 40 columns of each row.
+#ifndef TEXTMODE_COLS
 #define TEXTMODE_COLS 40
-#define TEXTMODE_ROWS 25
+#endif
+
+#ifndef TEXTMODE_ROWS
+#define TEXTMODE_ROWS 30
+#endif
 
 #define rgb888(r, g, b) ((((r) >> 3) << 11) | \
                          (((g) >> 2) << 5) | ((b) >> 3))
 
 void refresh_lcd(void);
 void tft_graphics_init(void);
+
+// Used when another driver owns the graphics API and drives the panel as a
+// second output.
+void tft_init(const uint8_t *framebuffer);
+void tft_set_framebuffer(const uint8_t *framebuffer);
+void tft_set_palette(uint8_t index, uint32_t color888);
 
 #ifdef __cplusplus
 }

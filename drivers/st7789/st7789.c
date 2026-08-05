@@ -14,6 +14,7 @@
 #include "hardware/sync.h"
 
 #include "graphics.h"
+#include "graphics_modes.h"
 
 #include <pico/multicore.h>
 
@@ -40,10 +41,22 @@ static uint sm_video_output = 0;
 static PIO pio = pio0;
 uint16_t palette[256];
 
-uint8_t *text_buffer = NULL;
-static uint8_t tft_primary_framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT]
-        __attribute__((aligned(4)));
 static const uint8_t *graphics_framebuffer;
+
+// Scratch line for the mode composer, as the other backends keep.
+static uint8_t tft_staging[SCREEN_WIDTH] __attribute__((aligned(4)));
+
+// 240 panel lines / 8 = the 30 text rows, and 320 pixels / 8 = 40 columns.
+#define TFT_TEXT_FONT_HEIGHT 8
+#define TFT_TEXT_COLUMNS (SCREEN_WIDTH / 8)
+
+// The 16 CGA text colors as panel pixels. Read-only, so this stays in flash.
+#define TFT_TEXT_RGB565(color) (uint16_t)rgb888(GRAPHICS_CGA_RED(color), \
+        GRAPHICS_CGA_GREEN(color), GRAPHICS_CGA_BLUE(color)),
+
+static const uint16_t tft_text_color[16] = {
+        GRAPHICS_TEXT_COLORS(TFT_TEXT_RGB565)
+};
 
 static const uint8_t init_seq[] = {
     1, 20, 0x01, // Software reset
@@ -124,8 +137,8 @@ static inline void stop_pixels(void) {
     st7789_set_pixel_mode(pio, sm_video_output, false);
 }
 
-void tft_graphics_init(void) {
-    graphics_framebuffer = tft_primary_framebuffer;
+void tft_init(const uint8_t *framebuffer) {
+    graphics_framebuffer = framebuffer;
 
     gpio_init(TFT_CS_PIN);
     gpio_init(TFT_DC_PIN);
@@ -148,7 +161,7 @@ void tft_graphics_init(void) {
     gpio_put(TFT_LED_PIN, 1);
 
     for (int i = 0; i < 256; ++i) {
-        graphics_set_palette((uint8_t)i, 0x0000);
+        tft_set_palette((uint8_t)i, 0x0000);
     }
 
     lcd_set_window(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -161,13 +174,101 @@ void tft_graphics_init(void) {
     stop_pixels();
 }
 
+void tft_set_framebuffer(const uint8_t *framebuffer) {
+    graphics_framebuffer = framebuffer;
+}
+
+void tft_set_palette(const uint8_t index, const uint32_t color888) {
+    palette[index] = rgb888(color888 >> 16, color888 >> 8 & 0xff, color888 & 0xff);
+}
+
+// One text line of the panel. The glyph is read from the lowest bit up, the way
+// the font is stored and the way the other backends read it.
+static void __time_critical_func(tft_push_text_line)(const unsigned row) {
+    unsigned glyph_line;
+    const uint8_t *cell = graphics_text_row(row, TFT_TEXT_FONT_HEIGHT,
+                                            &glyph_line);
+    unsigned drawn = 0;
+
+    if (cell != NULL) {
+        // The panel holds 40 cells. A wider text buffer, as an NTSC build
+        // keeps, shows its left-hand 40 columns here.
+        unsigned columns = graphics_text_columns();
+        if (columns > TFT_TEXT_COLUMNS) {
+            columns = TFT_TEXT_COLUMNS;
+        }
+
+        for (unsigned column = columns; column--;) {
+            const uint8_t character = *cell++;
+            const uint8_t attribute = *cell++;
+            uint8_t glyph = font_8x8[character * TFT_TEXT_FONT_HEIGHT +
+                                     glyph_line];
+            const uint16_t color[2] = {
+                    tft_text_color[attribute >> 4],
+                    tft_text_color[attribute & 0x0fu]
+            };
+
+            for (unsigned bit = 8; bit--;) {
+                st7789_lcd_put_pixel(pio, sm_video_output, color[glyph & 1u]);
+                glyph >>= 1;
+            }
+        }
+        drawn = columns * 8u;
+    }
+
+    for (unsigned pixel = drawn; pixel < SCREEN_WIDTH; ++pixel) {
+        st7789_lcd_put_pixel(pio, sm_video_output, tft_text_color[0]);
+    }
+}
+
+void __time_critical_func(refresh_lcd)(void) {
+    const bool text = graphics_source_is_text();
+
+    if (!text && graphics_framebuffer == NULL) {
+        return;
+    }
+
+    lcd_set_window(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    start_pixels();
+
+    for (unsigned row = 0; row < SCREEN_HEIGHT; ++row) {
+        if (text) {
+            tft_push_text_line(row);
+            continue;
+        }
+
+        const uint8_t *line = graphics_source_line(graphics_framebuffer, row,
+                                                   tft_staging);
+        for (unsigned pixel = 0; pixel < SCREEN_WIDTH; ++pixel) {
+            st7789_lcd_put_pixel(pio, sm_video_output, palette[line[pixel]]);
+        }
+    }
+
+    st7789_lcd_wait_idle(pio, sm_video_output);
+    stop_pixels();
+}
+
+// Below here the panel is the only output, so it owns the graphics API. An
+// NTSC build supplies its own and drives the panel through the calls above.
+#if !defined(NTSC_TV)
+
+uint8_t *text_buffer = NULL;
+static uint8_t tft_primary_framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT]
+        __attribute__((aligned(4)));
+
+void tft_graphics_init(void) {
+    tft_init(tft_primary_framebuffer);
+}
+
 void graphics_set_mode(const enum graphics_mode_t mode) {
-    (void)mode;
+    graphics_source_set_mode(mode);
 }
 
 void graphics_set_buffer(uint8_t *buffer,
                          const uint16_t width,
                          const uint16_t height) {
+    graphics_source_set_buffer(buffer, width, height);
+
     if (width == SCREEN_WIDTH && height == SCREEN_HEIGHT) {
         graphics_framebuffer = buffer;
     }
@@ -178,8 +279,7 @@ void graphics_set_textbuffer(uint8_t *buffer) {
 }
 
 void graphics_set_offset(const int x, const int y) {
-    (void)x;
-    (void)y;
+    graphics_source_set_offset(x, y);
 }
 
 void graphics_set_bgcolor(const uint32_t color888) {
@@ -191,28 +291,8 @@ void graphics_set_flashmode(const bool flash_line, const bool flash_frame) {
     (void)flash_frame;
 }
 
-void __time_critical_func(refresh_lcd)(void) {
-    if (graphics_framebuffer == NULL) {
-        return;
-    }
-
-    lcd_set_window(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    start_pixels();
-
-    const uint8_t *input = graphics_framebuffer;
-    uint32_t pixel_count = SCREEN_WIDTH * SCREEN_HEIGHT;
-    while (pixel_count--) {
-        st7789_lcd_put_pixel(
-                pio,
-                sm_video_output,
-                palette[*input++]);
-    }
-    st7789_lcd_wait_idle(pio, sm_video_output);
-    stop_pixels();
-}
-
 void graphics_set_palette(const uint8_t index, const uint32_t color) {
-    palette[index] = rgb888(color >> 16, color >> 8 & 0xff, color & 0xff);
+    tft_set_palette(index, color);
 }
 
 uint8_t *graphics_get_framebuffer(void) {
@@ -236,3 +316,5 @@ void clrScr(const uint8_t color) {
         *output++ = (uint16_t)(color << 4 | ' ');
     }
 }
+
+#endif

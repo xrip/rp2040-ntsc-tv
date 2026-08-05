@@ -119,12 +119,8 @@ static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256]
 #define NTSC_TEXT_SAMPLE(color) \
     (uint16_t)((NTSC_TEXT_LUMINANCE(color) * 1792u + 2u * 65536u + 32768u) / 65536u),
 
-#define NTSC_TEXT_COLORS(X) \
-    X(0)  X(1)  X(2)  X(3)  X(4)  X(5)  X(6)  X(7) \
-    X(8)  X(9)  X(10) X(11) X(12) X(13) X(14) X(15)
-
 static const uint16_t ntsc_text_sample[16] = {
-        NTSC_TEXT_COLORS(NTSC_TEXT_SAMPLE)
+        GRAPHICS_TEXT_COLORS(NTSC_TEXT_SAMPLE)
 };
 
 // 240 active lines / 8 = the 30 text rows of TEXTMODE_ROWS.
