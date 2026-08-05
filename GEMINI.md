@@ -52,7 +52,7 @@ Build output, including the `.uf2` file, is written to
 1.  Connect the board in BOOTSEL mode.
 2.  Copy `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or `ntsc-tv-tft.uf2` to the mass
     storage device.
-3.  Default pins: composite on GPIO27 (`NTSC_PIN_OUTPUT`), VGA on GPIO6..13
+3.  Default pins: composite on GPIO28 (`NTSC_PIN_OUTPUT`), VGA on GPIO6..13
     (`VGA_BASE_PIN`).
 
 ## Development Conventions

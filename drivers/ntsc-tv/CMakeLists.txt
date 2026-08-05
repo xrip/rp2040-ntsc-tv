@@ -14,7 +14,7 @@ target_compile_options(ntsc-tv-driver INTERFACE
         $<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_CURRENT_LIST_DIR}/ntsc-tv.h>
 )
 
-# The default is GPIO27, set by ntsc-tv.h. A board which already uses that pin
+# The default is GPIO28, set by ntsc-tv.h. A board which already uses that pin
 # gives another one here; a command-line define beats every header default.
 if (DEFINED NTSC_PIN_OUTPUT)
     target_compile_definitions(ntsc-tv-driver INTERFACE NTSC_PIN_OUTPUT=${NTSC_PIN_OUTPUT})

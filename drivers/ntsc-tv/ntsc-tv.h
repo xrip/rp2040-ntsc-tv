@@ -6,8 +6,10 @@
 extern "C" {
 #endif
 
+// GPIO28 is PWM slice 6 channel A. GPIO26 and GPIO27 share slice 5, and sound
+// hardware usually sits there, so 28 is the pin most often left free.
 #ifndef NTSC_PIN_OUTPUT
-#define NTSC_PIN_OUTPUT 27
+#define NTSC_PIN_OUTPUT 28
 #endif
 
 #ifndef GRAPHICS_FRAME_WIDTH

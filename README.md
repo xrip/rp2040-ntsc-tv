@@ -52,7 +52,7 @@ The objects use six color ramps and crossfades.
                     |                    |
                PIO0 state machine       PWM
                     |                    |
-             GPIO 6..13 default     GPIO 27 default
+             GPIO 6..13 default     GPIO 28 default
 ```
 
 Both pin groups are defaults only: `VGA_BASE_PIN` and `NTSC_PIN_OUTPUT` move
@@ -709,16 +709,17 @@ select the output modules; the rest tune them:
 | `NTSC_TV` | `ON` | link `ntsc-tv-driver` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
-| `NTSC_PIN_OUTPUT` | `27` | composite output GPIO |
+| `NTSC_PIN_OUTPUT` | `28` | composite output GPIO |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
 | `NTSC_USE_SCRATCH_Y` | `OFF` | put NTSC palette tables in scratch Y |
 | `GRAPHICS_BUILTIN_FRAMEBUFFER` | `ON` | keep the static 320 x 240 buffer |
 | `GRAPHICS_NO_CLOCK_SETUP` | `OFF` | let the application own the system clock |
 
-Set `NTSC_PIN_OUTPUT` when GPIO27 is already taken, which it often is: sound
-hardware tends to sit on GPIO26 and GPIO27. A CMake value beats the header
-default, and any GPIO works, odd or even. Pick one whose PWM slice nothing else
-uses.
+The default is GPIO28 because it is the pin most often left free: sound hardware
+tends to take GPIO26 and GPIO27, which share PWM slice 5 with each other.
+Set `NTSC_PIN_OUTPUT` when GPIO28 does not suit the board. A CMake value beats
+the header default, and any GPIO works, odd or even. Pick one whose PWM slice
+nothing else uses.
 
 Turn `GRAPHICS_BUILTIN_FRAMEBUFFER` off when the application gives its own
 picture buffer through `graphics_set_buffer()`. This drops 76,800 bytes of RAM
@@ -835,7 +836,7 @@ The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or
 
 ### NTSC composite
 
-The default output pin is GPIO27; `NTSC_PIN_OUTPUT` moves it.
+The default output pin is GPIO28; `NTSC_PIN_OUTPUT` moves it.
 
 ```text
 NTSC_PIN_OUTPUT -- 75 ohm --+-- composite video out
