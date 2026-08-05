@@ -332,11 +332,20 @@ The current line states are:
 | Lines | State |
 |---:|---|
 | 0..9 | equalizing/sync pattern |
-| 10..21 | horizontal sync, color burst, and blank level |
-| 22..261 | 240 active source rows |
+| 10..18 | horizontal sync, color burst, and blank level |
+| 19..258 | 240 active source rows |
+| 259..261 | active area blanked, the vertical front porch |
 
-Only lines 0, 1, 10, and 11 make the complete base patterns. The other lines
-in those two ranges get the same pattern by ping-pong buffer reuse.
+Only lines 0, 1, 10, 11, 259, and 260 build a pattern. The other lines in those
+ranges get the same pattern by ping-pong buffer reuse: the two buffers alternate
+by line parity, so a line repeats what the line two before it left there. Every
+one of the 262 lines is still transmitted; only the work of rebuilding the
+buffer is skipped.
+
+The three porch lines matter because the last active line would otherwise run
+straight into vertical sync. Bright picture content next to the sync pulses can
+bias a receiver's sync separator, which shows as bend or jitter at the top of
+the frame.
 
 Every source pixel makes two PWM samples. Two adjacent source pixels make one
 complete four-phase color-subcarrier cycle:
@@ -346,7 +355,7 @@ even pixel -> phase 0, phase 90
 odd pixel  -> phase 180, phase 270
 ```
 
-The active picture starts on NTSC line 22. Source row `y` is read from:
+The active picture starts on NTSC line 19. Source row `y` is read from:
 
 ```c
 framebuffer + y * 320
@@ -666,16 +675,28 @@ Changing the 320 x 240 line and frame size itself is not enough. The row address
 math, scanline loops, palette form, active area, DMA count, and line buffer
 sizes are connected to the present 320 x 240 x 8 design.
 
-## NTSC line-state note
+## NTSC deviations from broadcast
 
-The current NTSC generator relies on line-buffer reuse. Some non-active line
-numbers do not write a new full line; they keep the pattern already in that
-ping-pong buffer. Also, the two conditions named as vertical blanking after the
-active picture test line numbers 262 and 263, while the line counter wraps at
-262. Those conditions cannot run in the current frame counter.
+The generator is a 240p composite source, not a broadcast encoder. Four
+deliberate differences:
 
-This does not change the architecture described above, but it is an important
-current code limit if the NTSC vertical layout is changed.
+| Item | Broadcast | Here | Why |
+|---|---|---|---|
+| Lines | 525 interlaced, 262.5 per field | 262 progressive | 240p, as retro sources use |
+| Samples per line | 910, 227.5 subcarrier cycles | 908, 227 cycles | an integer cycle count keeps the subcarrier phase the same on every line, so one fixed even/odd palette split serves the whole frame |
+| Vertical interval | 3 equalizing, 3 serrated sync, 3 equalizing | 10 identical broad pulses | far simpler; receivers accept it |
+| Line and frame rate | 15,734.26 Hz, 59.94 Hz | 15,768.9 Hz, 60.19 Hz | follows from the 908-sample line; 0.22% and 0.4% fast |
+
+The 908-sample line is the important one. Choosing 227 whole subcarrier cycles
+instead of 227.5 is what makes the encoder cheap: with 227.5 the subcarrier
+phase would flip on every line and each palette lookup would need a per-line
+phase term.
+
+The generator also relies on line-buffer reuse, described in the line-state
+table above. This matters if the vertical layout is ever changed: moving the
+picture means re-checking which line numbers still build a full pattern, because
+a reused buffer silently repeats whatever the previous same-parity line left in
+it.
 
 ## Build system
 

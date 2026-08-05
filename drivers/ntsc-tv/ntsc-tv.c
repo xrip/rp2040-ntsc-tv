@@ -48,7 +48,10 @@ caused by using this program.
 #define NTSC_SAMPLES_PER_LINE  908   // 227 * 4 samples per scanline
 #define NTSC_TOTAL_LINES       262   // Total scanlines in NTSC frame
 #define NTSC_VSYNC_LINES       10    // Vertical sync pulse lines
-#define NTSC_VBLANK_TOP        12    // Top blanking interval lines
+// Top blanking. 10 sync lines + 9 here = 19, which leaves 262 - 19 - 240 = 3
+// blank lines after the picture. Broadcast NTSC puts 3 pre-equalizing lines in
+// that slot, so the receiver sees a picture-free run-in to vertical sync.
+#define NTSC_VBLANK_TOP        9     // Top blanking interval lines
 #define NTSC_HSYNC_WIDTH       68    // Horizontal sync width in samples (~4.7μs)
 #define NTSC_BACK_PORCH_SAMPLES 8
 #define NTSC_COLOR_BURST_CYCLES 9
