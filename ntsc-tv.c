@@ -1,16 +1,18 @@
 #include <math.h>
 #include <string.h>
 
+#if !defined(HDMI_TEXT_DEMO)
 #include <hardware/clocks.h>
 #include <hardware/gpio.h>
 #include <pico/multicore.h>
 #include <pico/time.h>
+#endif
 
 #include <graphics.h>
+#include "demo-graphics.h"
 
 enum {
     DEMO_HORIZON = 68,
-    DEMO_FRAME_TIME_MS = 33,
     DEMO_X_TRAVEL_FRAMES = 157,
     DEMO_DEPTH_TRAVEL_FRAMES = 211,
     DEMO_BOUNCE_FRAMES = 44,
@@ -631,7 +633,7 @@ static void demo_render_scene(uint8_t *framebuffer,
     }
 }
 
-static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
+void demo_graphics_render(uint8_t *framebuffer, const uint32_t frame) {
     const uint32_t scene = (frame / DEMO_SCENE_FRAMES) % DEMO_SCENE_COUNT;
     const uint32_t scene_frame = frame % DEMO_SCENE_FRAMES;
     const uint32_t transition_start =
@@ -659,15 +661,19 @@ static void demo_render_frame(uint8_t *framebuffer, const uint32_t frame) {
     }
 }
 
+void demo_graphics_init(void) {
+    demo_init_palette();
+    demo_init_floor();
+    demo_init_wave();
+    demo_init_ball();
+}
+
 /* ---------------------------------------------------------------------------
  * Text part
  * ------------------------------------------------------------------------ */
 
-// HDMI scans the framebuffer straight out and ignores graphics_set_mode(), so
-// for it a text part would only freeze the picture. That build runs the
-// graphics part alone, and the linker drops everything below. TFT reads the
-// mode, though it is 40 columns wide, so the right-hand half of each row falls
-// off the panel.
+// The default HDMI demo runs graphics only. hdmi-text-demo.c tests native text
+// and reuses the same graphics renderer between text cycles.
 #if defined(HDMI)
 #define DEMO_HAS_TEXT_PART 0
 #else
@@ -793,6 +799,7 @@ static void demo_render_text_frame(void) {
 
 #endif // DEMO_HAS_TEXT_PART
 
+#if !defined(HDMI_TEXT_DEMO)
 [[noreturn]] static void core1_entry(void) {
     uint32_t frame = 0;
     uint8_t *const primary_buffer = graphics_get_framebuffer();
@@ -816,7 +823,7 @@ static void demo_render_text_frame(void) {
         } else
 #endif
         {
-            demo_render_frame(draw_buffer, frame++);
+            demo_graphics_render(draw_buffer, frame++);
             graphics_present_framebuffer(draw_buffer);
             draw_buffer = draw_buffer == demo_backbuffer
                           ? primary_buffer
@@ -841,10 +848,7 @@ static void demo_render_text_frame(void) {
 }
 
 [[noreturn]] int main(void) {
-    demo_init_palette();
-    demo_init_floor();
-    demo_init_wave();
-    demo_init_ball();
+    demo_graphics_init();
     graphics_init();
 
     gpio_init(PICO_DEFAULT_LED_PIN);
@@ -866,3 +870,4 @@ static void demo_render_text_frame(void) {
         sleep_ms(750);
     }
 }
+#endif

@@ -100,10 +100,10 @@ pico_set_double_implementation(${PROJECT_NAME} none) # size optimizations
 pico_set_printf_implementation(${PROJECT_NAME} none)
 
 if (HDMI_TEXT_DEMO)
-    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/hdmi-text-demo.c)
-    # The demo owns only its small text page and the existing font. It has no
-    # 320x240 graphics buffer, and the driver must not allocate an unused one.
-    target_compile_definitions(${PROJECT_NAME} PRIVATE GRAPHICS_NO_BUILTIN_FRAMEBUFFER=1)
+    target_sources(${PROJECT_NAME} PRIVATE hdmi-text-demo.c ntsc-tv.c)
+    # Both graphics buffers belong to the demo.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+            HDMI_TEXT_DEMO=1 GRAPHICS_NO_BUILTIN_FRAMEBUFFER=1)
 else()
     target_sources(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ntsc-tv.c)
 endif()

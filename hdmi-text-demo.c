@@ -1,4 +1,5 @@
 #include <graphics.h>
+#include "demo-graphics.h"
 
 #include <hardware/gpio.h>
 #include <pico/time.h>
@@ -7,6 +8,8 @@
 // An emulator replaces these pointers with its existing B800 text memory and
 // font map. All three demo geometries reuse the same 4,800-byte allocation.
 static uint8_t demo_vram[80u * 30u * 2u] __attribute__((aligned(4)));
+static uint8_t demo_graphics[2][GRAPHICS_FRAME_WIDTH * GRAPHICS_FRAME_HEIGHT]
+        __attribute__((aligned(4)));
 
 static const enum graphics_mode_t demo_modes[] = {
     TEXTMODE_80x30, TEXTMODE_80x25_COLOR, TEXTMODE_40x25_COLOR
@@ -88,19 +91,36 @@ static void demo_draw(unsigned selection) {
                   0, 24, 7, 0);
         draw_text("16 foreground colors on black/gray; 16 backgrounds with black text.",
                   0, 25, 7, 0);
-        draw_text("Modes rotate every 8 s: 80x30 -> 80x25 -> 40x25.", 0, 26, 7, 0);
-        draw_text("No graphics framebuffer and no driver copy of VRAM/font.", 0, 27, 7, 0);
+        draw_text("Text: 8 s each; graphics: 60 s; then repeat.", 0, 26, 7, 0);
+        draw_text("Shared text VRAM/font; double-buffered 3D graphics.", 0, 27, 7, 0);
     }
     draw_text("LIVE FONT / CURSOR", 0, rows - 1u, 11, 0);
     demo_repeat(columns - 1u, rows - 1u, 1, ' ', 15, 0, columns);
+}
+
+static void demo_run_graphics(void) {
+    const absolute_time_t end = make_timeout_time_ms(60000);
+    absolute_time_t next_frame = get_absolute_time();
+    unsigned buffer = 1;
+    uint32_t frame = 1;
+    while (!time_reached(end)) {
+        demo_graphics_render(demo_graphics[buffer], frame++);
+        graphics_present_framebuffer(demo_graphics[buffer]);
+        buffer ^= 1u;
+        gpio_put(PICO_DEFAULT_LED_PIN, (frame / 30u) & 1u);
+        next_frame = delayed_by_ms(next_frame, DEMO_FRAME_TIME_MS);
+        if (absolute_time_diff_us(next_frame, end) < 0) next_frame = end;
+        sleep_until(next_frame);
+    }
 }
 
 int main(void) {
     for (unsigned y = 0; y < 16u; ++y) {
         font_8x16[0xfeu * 16u + y] = (y & 1u) ? 0xaau : 0x55u;
     }
-    // Build the first screen before enabling DMA: the first visible frame is
-    // already valid. The graphics framebuffer is disabled in this demo build.
+    demo_graphics_init();
+    graphics_set_buffer(demo_graphics[0], GRAPHICS_FRAME_WIDTH, GRAPHICS_FRAME_HEIGHT);
+    // Build the first screen before enabling DMA.
     demo_draw(0);
     graphics_init();
 
@@ -118,7 +138,14 @@ int main(void) {
         }
         if (++seconds == 8u) {
             seconds = 0;
-            selection = (selection + 1u) % 3u;
+            if (++selection == 3u) {
+                demo_graphics_render(demo_graphics[0], 0);
+                graphics_set_buffer(demo_graphics[0], GRAPHICS_FRAME_WIDTH,
+                                    GRAPHICS_FRAME_HEIGHT);
+                graphics_set_mode(VGA_320x240x256);
+                demo_run_graphics();
+                selection = 0;
+            }
             demo_draw(selection);
         }
     }

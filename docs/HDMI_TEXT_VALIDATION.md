@@ -16,8 +16,13 @@ codec pin-order/polarity combinations. All three software previews also render.
 Shell scripts use LF line endings on Windows checkouts.
 
 Arm GCC 15.2.1 builds both HDMI text and graphics demos for RP2040 and RP2350.
-The RP2350 VGA/NTSC build also passes. Text demo RAM usage is 20,768 bytes on
-RP2040 and 20,564 bytes on RP2350, plus a separate 2,048-byte scratch-Y stack.
+The RP2350 VGA/NTSC build also passes. The demo now runs each text mode for
+eight seconds, then the original ball/torus/helix demo for 60 seconds, and returns
+to text. Its two application-owned 76,800-byte graphics buffers and existing
+3D renderer tables raise RAM usage to 210,932 bytes on RP2040 and 210,728 bytes
+on RP2350, plus a separate 2,048-byte scratch-Y stack.
+The preview runner checks the real main loop with a virtual clock: mode changes
+occur at 0, 8, 16, 24, and 84 seconds, and graphics frames alternate buffers.
 Both text IRQ call audits have no XIP targets, indirect calls, or unresolved
 symbols. The final RP2350 image includes the 256-byte flash setup section.
 

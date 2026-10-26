@@ -40,7 +40,9 @@ also the one part of the demo that exercises a text mode.
 The default HDMI and TFT demos run the graphics part alone. HDMI additionally
 supports native 640 x 480 text from application-owned VRAM and a supplied font.
 The separate `rp2040-hdmi-text` / `rp2350-hdmi-text` demo shows all 16 foreground
-and background colors, and cycles through 80 x 30, 80 x 25, and 40 x 25.
+and background colors, and cycles through 80 x 30, 80 x 25, and 40 x 25 for
+eight seconds each, followed by 60 seconds of the original ball, torus, and helix
+graphics demo.
 See [HDMI text and emulator integration](docs/HDMI_TEXT.md). TFT continues to
 scan the graphics framebuffer directly.
 
@@ -743,7 +745,7 @@ select the output modules; the rest tune them:
 | `VGA` | `ON` | link `vga` and set `VGA=1` |
 | `NTSC_TV` | `ON` | link `ntsc-composite` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
-| `HDMI_TEXT_DEMO` | `OFF` | HDMI text palette demo; omit the graphics framebuffer |
+| `HDMI_TEXT_DEMO` | `OFF` | HDMI text/3D cycle with application-owned graphics buffers |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_PIN_OUTPUT` | `28` | composite output GPIO |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
@@ -881,7 +883,10 @@ cmake --build cmake-build-rp2040-hdmi-text --target ntsc-tv
 ```
 
 The test reuses one 4,800-byte application text page and the existing `font_8x16`.
-It changes a glyph in place once per second and cycles modes every eight seconds.
+It changes a glyph in place once per second. After eight seconds in each text
+mode, it runs the original 3D scenes for 60 seconds, then repeats. The graphics
+phase shares the renderer in `ntsc-tv.c` and uses two 76,800-byte application
+buffers for frame swaps; the driver's built-in framebuffer stays disabled.
 NTSC is disabled in these builds; its driver is unchanged.
 
 ## Hardware

@@ -253,7 +253,10 @@ must be off in these builds. If picotool is already installed, CMake accepts its
 package directory through `-Dpicotool_DIR=/path/to/lib/cmake/picotool`.
 
 The original `rp2040-hdmi` and `rp2350-hdmi` presets retain the original graphics
-demo. The new text presets disable the unused graphics framebuffer. The SRAM
+demo. The text demo shows each text mode for eight seconds, followed by a
+60-second run of the original ball, torus, and helix scenes, then repeats.
+It shares the renderer in `ntsc-tv.c`, supplies two 76,800-byte graphics buffers,
+and disables the driver's built-in framebuffer. The SRAM
 divider setting is supplied by the HDMI interface target; carry that target
 setting over when integrating individual driver files into another build.
 
