@@ -4,6 +4,7 @@
 // occupies two words; the serializer consumes only the low 30 bits of each.
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 enum { HDMI_WORKSPACE_BYTES = 4896, HDMI_PALETTE_COLORS = 252 };
 
@@ -16,8 +17,13 @@ union hdmi_workspace {
         uint8_t lines[2][400];
     } graphics;
     struct {
-        uint32_t palette[256][2];
-        uint8_t lines[2][800];
+        uint32_t palette[64][2];    // 32 colours/controls per even/odd phase
+        uint32_t attributes[256];   // packed foreground/background command bits
+        uint16_t glyphs[2][256];    // both font bit orders, including pixel phase
+        uint16_t wide_glyphs[2][16]; // four font bits doubled to eight pixels
+        uint8_t lines[2][400];      // 100 commands, eight physical pixels each
+        uint32_t attribute_state;
+        uint8_t reserved[220];     // keep the palette cache at its old offset
         uint8_t graphics_rgb[256][3];
     } text;
 };
@@ -126,39 +132,49 @@ static inline void hdmi_restore_graphics_palette(union hdmi_workspace *storage) 
     }
 }
 
-// Four adjacent physical pixel indices, little-endian. background is the
-// colour repeated into four bytes; difference is the scalar foreground^bg.
-// Each byte of bits is 0 or 1, so multiplying by a four-bit colour difference
-// selects that colour independently in all four bytes, with no carries.
-static __attribute__((always_inline)) inline uint32_t hdmi_text_four_pixels(
-        unsigned glyph_bits, uint32_t background, uint32_t difference) {
-    const uint32_t bits = ((glyph_bits & 15u) * UINT32_C(0x00204081)) &
-                          UINT32_C(0x01010101);
-    return (background ^ (bits * difference)) | UINT32_C(0x10001000);
+// The twelve-instruction PIO expander consumes these command fields directly.
+// Bits 24..26 must stay zero: the background path discards the low 24 bits.
+static inline uint32_t hdmi_text_attribute_word(unsigned attribute,
+                                               bool blink, bool hidden) {
+    const unsigned background = (attribute >> 4) & (blink ? 7u : 15u);
+    const unsigned foreground = blink && hidden && (attribute & 128u)
+            ? background : attribute & 15u;
+    return (uint32_t)background << 27 | foreground;
 }
 
-// MSB-first fonts are reversed during expansion, saving a separate byte
-// bit-reversal for every character on every scanline.
-static __attribute__((always_inline)) inline uint32_t hdmi_text_four_pixels_reversed(
-        unsigned glyph_bits, uint32_t background, uint32_t difference) {
-    const uint32_t bits = (((glyph_bits & 15u) * UINT32_C(0x08040201)) >> 3u) &
-                          UINT32_C(0x01010101);
-    return (background ^ (bits * difference)) | UINT32_C(0x10001000);
+static inline uint16_t hdmi_text_glyph_pattern(unsigned glyph, bool msb_first) {
+    unsigned pattern = 0x8888u; // every odd physical pixel uses TMDS phase one
+    for (unsigned pixel = 0; pixel < 8; ++pixel) {
+        const unsigned bit = msb_first ? 7u - pixel : pixel;
+        pattern |= ((glyph >> bit) & 1u) << (pixel * 2u);
+    }
+    return (uint16_t)pattern;
 }
 
-// The 40-column mode doubles each source glyph bit horizontally.
-static __attribute__((always_inline)) inline uint32_t hdmi_text_two_doubled_pixels(
-        unsigned glyph_bits, uint32_t background, uint32_t difference) {
-    const uint32_t bits = ((glyph_bits & 1u) | ((glyph_bits & 2u) << 15u)) * 257u;
-    return (background ^ (bits * difference)) | UINT32_C(0x10001000);
+static inline uint16_t hdmi_text_wide_pattern(unsigned nibble, bool msb_first) {
+    unsigned pattern = 0x8888u;
+    for (unsigned pixel = 0; pixel < 8; ++pixel) {
+        const unsigned bit = msb_first ? 3u - pixel / 2u : pixel / 2u;
+        pattern |= ((nibble >> bit) & 1u) << (pixel * 2u);
+    }
+    return (uint16_t)pattern;
 }
 
-// This variant consumes bits 7 and 6, in that order, from an MSB-first glyph.
-static __attribute__((always_inline)) inline uint32_t hdmi_text_two_doubled_pixels_reversed(
-        unsigned glyph_bits, uint32_t background, uint32_t difference) {
-    const uint32_t bits = (((glyph_bits >> 7u) & 1u) |
-                          ((glyph_bits & 64u) << 10u)) * 257u;
-    return (background ^ (bits * difference)) | UINT32_C(0x10001000);
+static inline uint32_t hdmi_text_solid_command(unsigned color) {
+    return (uint32_t)color << 27 | UINT32_C(0x00888800) | color;
+}
+
+static inline void hdmi_initialize_text_lookups(union hdmi_workspace *storage) {
+    for (unsigned attribute = 0; attribute < 256; ++attribute)
+        storage->text.attributes[attribute] =
+                hdmi_text_attribute_word(attribute, false, false);
+    for (unsigned order = 0; order < 2; ++order) {
+        for (unsigned glyph = 0; glyph < 256; ++glyph)
+            storage->text.glyphs[order][glyph] = hdmi_text_glyph_pattern(glyph, order != 0);
+        for (unsigned nibble = 0; nibble < 16; ++nibble)
+            storage->text.wide_glyphs[order][nibble] = hdmi_text_wide_pattern(nibble, order != 0);
+    }
+    storage->text.attribute_state = 0;
 }
 
 static inline uint64_t hdmi_text_pixel(uint32_t rgb, unsigned phase) {

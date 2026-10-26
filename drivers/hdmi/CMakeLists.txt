@@ -1,6 +1,11 @@
 add_library(hdmi INTERFACE)
 
 target_sources(hdmi INTERFACE ${CMAKE_CURRENT_LIST_DIR}/hdmi.c)
+pico_generate_pio_header(hdmi ${CMAKE_CURRENT_LIST_DIR}/hdmi_text.pio)
+
+# Optional oscilloscope/logic-analyser marker, disabled without code or RAM cost.
+set(HDMI_PROFILE_GPIO "-1" CACHE STRING "GPIO high while the HDMI DMA IRQ runs; -1 disables")
+target_compile_definitions(hdmi INTERFACE HDMI_PROFILE_GPIO=${HDMI_PROFILE_GPIO})
 
 # RP2040's scanline renderer divides row/font/VRAM addresses. Keep the SDK
 # hardware-divider entry points in SRAM so the IRQ never waits for XIP code.

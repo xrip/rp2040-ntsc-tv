@@ -269,11 +269,11 @@ drivers. The VGA-only adapter compiles to an empty unit in that form.
 
 This module sends 640 x 480 timing with either doubled 320 x 240 indexed graphics
 or native-resolution text. It uses one PIO state machine
-for TMDS output, one PIO state machine for palette-address conversion, four DMA
+for TMDS output, one PIO state machine for glyph expansion/palette addressing, four DMA
 channels, and an exclusive DMA IRQ. The default HDMI base pin is GPIO12. HDMI
 uses a 378 MHz system clock and is not combined with VGA or NTSC.
 
-Four TMDS control symbols use palette slots 252 through 255. Logical colors in
+In graphics, four TMDS control symbols use palette slots 252 through 255. Logical colors in
 those four slots are remapped to slots 48 through 51, so the HDMI form has 252
 independent palette colors.
 
@@ -283,8 +283,12 @@ The existing 4,896-byte HDMI palette/scanline workspace is reused for both
 transports; additional scanline code and small descriptors still consume RAM.
 Text uses a fixed 16-color CGA palette. Graphics/text class changes restart the
 DMA/PIO pipeline during vertical blanking; the monitor may briefly relock.
+The CPU prepares one command per eight physical pixels; PIO expands its glyph
+and chooses foreground/background. The two state machines use 22 instruction
+words, with the expander requiring addresses 0..11 on PIO0.
 The integration API, memory accounting, and validation limits are documented in
-[docs/HDMI_TEXT.md](docs/HDMI_TEXT.md).
+[docs/HDMI_TEXT.md](docs/HDMI_TEXT.md). CPU comparisons and GPIO profiling are in
+[docs/HDMI_TEXT_PERFORMANCE.md](docs/HDMI_TEXT_PERFORMANCE.md).
 
 ### `drivers/st7789`
 
@@ -746,6 +750,7 @@ select the output modules; the rest tune them:
 | `NTSC_TV` | `ON` | link `ntsc-composite` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
 | `HDMI_TEXT_DEMO` | `OFF` | HDMI text/3D cycle with application-owned graphics buffers |
+| `HDMI_PROFILE_GPIO` | `-1` | Optional GPIO high during the HDMI IRQ; choose an unused pin |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_PIN_OUTPUT` | `28` | composite output GPIO |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |

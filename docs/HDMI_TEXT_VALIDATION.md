@@ -1,187 +1,171 @@
-# HDMI text: validation and RAM accounting
+# HDMI text command transport: validation and RAM accounting
 
-Base repository: `xrip/rp2040-ntsc-tv`, branch `vga-tv-hybrid`, commit
-`7debfc46844b24d5c1979167b0e91847601ca68b`.
+Baseline: `xrip/rp2040-ntsc-tv`, branch `vga-tv-hybrid`, commit
+`34f401e07bb4ade91ec604512b086d9b368efad3`. Date: 2026-10-26.
+This report supersedes the earlier byte-index text implementation's measurements.
 
-Validation date: 2026-10-26. These results describe the supplied source and
-toolchain. The original delivery was checked without a board. The user later
-confirmed working RP2350 M2P2 HDMI output with GPIO12..19 and the embedded flash
-setup (clock divider 4, read delay 4). Scanline timing has not been measured.
+Current upstream's GPIO12..19 assignment, RP2350 flash fixes, text descriptor
+API, application VRAM/font and text/3D cycle are preserved. `CMakeLists.txt`,
+`hdmi-text-demo.c`, `ntsc-tv.c`, `demo-graphics.h` and
+`drivers/hdmi/hdmi.h` are byte-identical to the baseline. NTSC is unchanged.
 
-## Current checkout checks
+The previous driver produced working output on the user's board.
+**The new command-based PIO transport has not yet been tested on a physical
+board.** Timing below is an instruction model, not a hardware measurement.
 
-After the YAGNI review, the host runner passes with Clang 23.1.1 on Windows
-and AddressSanitizer/UndefinedBehaviorSanitizer: 52,341 text checks and all four
-codec pin-order/polarity combinations. All three software previews also render.
-Shell scripts use LF line endings on Windows checkouts.
+## Local integration review
 
-Arm GCC 15.2.1 builds both HDMI text and graphics demos for RP2040 and RP2350.
-The RP2350 VGA/NTSC build also passes. The demo now runs each text mode for
-eight seconds, then the original ball/torus/helix demo for 60 seconds, and returns
-to text. Its two application-owned 76,800-byte graphics buffers and existing
-3D renderer tables raise RAM usage to 210,932 bytes on RP2040 and 210,728 bytes
-on RP2350, plus a separate 2,048-byte scratch-Y stack.
-The preview runner checks the real main loop with a virtual clock: mode changes
-occur at 0, 8, 16, 24, and 84 seconds, and graphics frames alternate buffers.
-Both text IRQ call audits have no XIP targets, indirect calls, or unresolved
-symbols. The final RP2350 image includes the 256-byte flash setup section.
+The review removed four unused byte-index expansion helpers and shared the
+word-fill loop between graphics bytes and text commands. The PIO program,
+command format and assembly kernels are unchanged.
 
-The following toolchain and controlled memory tables describe the original
-delivery, rather than these later checkout builds.
+Arm GCC 15.2.1 builds both text/3D demos. RAM use is 210,932 bytes on RP2040
+and 210,728 bytes on RP2350, plus the separate 2,048-byte scratch-Y stack.
+Clang 23.1.1 passes the host tests with AddressSanitizer and
+UndefinedBehaviorSanitizer. The PIO interpreter passes all 495,712 commands
+and backpressure checks; both generated SDK headers match its instruction
+words. Both linked IRQ audits have no flash code targets or unresolved calls.
+The linked RP2040 IRQ cases also pass under WSL with the pinned trace tools,
+checking output pixels, register preservation and memory bounds. Native Windows
+Unicorn failed during memory mapping, so that trace run used Linux instead.
 
-## Original delivery toolchain and builds
+The toolchain and benchmark tables below describe the supplied patch archive.
 
-- Raspberry Pi Pico SDK 2.3.1,
-  commit `079c6f39023649b154152db30f1d781e884879bc`.
+## Supplied toolchain and builds
+
+- Pico SDK 2.3.1, commit `079c6f39023649b154152db30f1d781e884879bc`.
 - Arm GNU Toolchain 14.2.Rel1, GCC 14.2.1 (20241119).
-- CMake 4.4.4; Ninja 1.13.2; picotool 2.3.1.
-- `MinSizeRel` with the repository's O3/LTO settings.
-- Real Arm builds for RP2040 / Cortex-M0+ and RP2350 Arm / Cortex-M33.
+- CMake 4.4.4, Ninja 1.13.2, picotool 2.3.1.
+- `MinSizeRel` with repository O3/LTO settings; RP2040 M0+ and RP2350 M33.
 
-The text palette demo and the existing HDMI graphics demo both build for both
-chips. UF2 images in the delivery archive are the text demos. The normal
-graphics demos retain their original source. No NTSC backend source is modified.
+The current text/3D application, original graphics application and controlled
+same-buffer harness build for both chips, before and after optimization.
+GPIO22 profiling also builds. No compiler warnings were reported.
+Normal UF2s in the archive are the current text/3D demos with profiling disabled.
 
-## Memory: what is unchanged
+## Memory
 
-The production workspace is a union checked by `_Static_assert`:
-
-| Allocation | Before | After |
-|---|---:|---:|
-| Aligned HDMI palette + two scanlines | 4,896 B | 4,896 B |
-| Driver-owned text framebuffer | 0 B | 0 B |
-| Driver-owned font cache | 0 B | 0 B |
-| 640 x 480 framebuffer | 0 B | 0 B |
-
-The 36-byte Arm text descriptor stores two borrowed pointers and their geometry.
-Additional small state and SRAM-resident code are also present. The 4,096-byte
-workspace alignment can hide code growth inside an existing linker gap or move
-the next aligned boundary. Therefore neither summing buffers nor comparing two
-unrelated demo programs is a correct total-memory measurement.
-
-### Controlled comparison with identical application storage
-
-The validation harness keeps the same allocations live in both baseline and
-updated builds: a 76,800-byte built-in graphics buffer, a 4,800-byte application
-text page, and one 4,096-byte writable bundled font. The updated build uses
-runtime-variable mode/font/blink/cursor/addressing settings so LTO cannot simply
-discard native text or its optional features.
-
-| Chip | Baseline RAM region | Updated RAM region | Difference |
+| Application | RP2040 baseline → optimized | RP2350 baseline → optimized | Separate stack reservations |
 |---|---:|---:|---:|
-| RP2040 | 97,520 B | 97,568 B | **+48 B** |
-| RP2350 Arm | 97,312 B | 97,360 B | **+48 B** |
+| Controlled full-feature harness | 97,568 → 97,568 B | 97,360 → 97,360 B | 2,048 B |
+| Current text/3D demo | 210,928 → 210,928 B | 210,720 → 210,720 B | 2,048 B |
+| Original graphics demo | 201,996 → 201,996 B | 201,788 → 201,788 B | 4,096 B |
 
-For these exact links, the additional SRAM code fits into space that was already
-lost to workspace alignment. **The +48 B result is specific to these linked
-applications and toolchain.** It is not a guarantee for an arbitrary emulator
-link: inspect that application's map and include SRAM code, alignment padding,
-SDK reservations, and stacks. The constant 4,896-byte workspace and the absence
-of copied VRAM/font are properties of the implementation itself.
+RAM-region values run from SRAM origin to the end of the fixed 2,048-byte heap
+reservation. Scratch-bank stack reservations are separate. The driver adds no
+runtime heap allocation. These are linked sizes, not dynamic heap/stack peaks.
 
-Excluding the reduction of this pre-existing alignment gap, the occupied
-sections grow by **1,232 B on RP2040 and 1,144 B on RP2350** in this comparison,
-mostly executable SRAM code. This is the cost to budget when an emulator's link
-does not have a suitable unused gap; its own alignment can also affect the
-final RAM-region delta.
+The workspace remains **4,896 B**. The controlled harness retains identical
+76,800-byte graphics, 4,800-byte text and 4,096-byte font allocations on both
+sides, with runtime-variable text features kept reachable through LTO.
+The current demo's two application graphics buffers already occupy 153,600 B
+in the baseline; they were not added by this optimization.
 
-The comparison harness and a portable reproduction script are supplied in the
-archive's `validation/` directory. The baseline uses its existing text-pointer
-API, which does not render text; equal application storage makes the added
-backend cost measurable without crediting the new implementation for deleting
-a different demo's buffers.
-
-### Standalone text demo
-
-| Chip | RAM region used | Separate main stack in scratch Y |
+| Controlled build | RP2040 before → after | RP2350 before → after |
 |---|---:|---:|
-| RP2040 | 20,764 B | 2,048 B |
-| RP2350 Arm | 20,556 B | 2,048 B |
+| Occupied `.data`, including SRAM code/font | 5,776 → 6,064 B | 5,652 → 6,016 B |
+| `.bss` | 87,328 → 87,328 B | 87,120 → 87,120 B |
+| Existing alignment gap | 2,224 → 1,936 B | 2,268 → 1,904 B |
 
-The RAM-region figures include the 4,800-byte application page, the one existing
-4,096-byte font, the 4,896-byte workspace, SRAM code/data, linker padding and SDK
-reservations (including the 2,048-byte heap reservation). No 76,800-byte graphics
-framebuffer is linked into these text-only demos. The main stack is reported
-separately and must be counted too. These are linker reservations, not measured
-worst-case runtime stack/heap use.
+Occupied sections grow **288 B / 364 B**, absorbed by existing padding before
+the aligned workspace. Zero linked growth is established for these applications;
+another emulator's link may expose the occupied-code increase or cross an
+alignment boundary. Fixed workspace size and no extra VRAM/font copy are the
+implementation guarantees.
 
-HDMI now honors `GRAPHICS_BUILTIN_FRAMEBUFFER=OFF`. This can eliminate the
-previously unconditional 76,800-byte built-in buffer when the emulator already
-provides its own graphics buffer. It is a separate integration choice, not the
-basis of the controlled +48-byte comparison above.
+Linked RP2040 tracing records software IRQ stack peaks of **184 B at 80 columns
+and 188 B at 40 columns**, versus 112 B normally and 132 B with dirty-divider
+preservation in the baseline. The sampled maximum grows 56 B. Hardware exception
+stacking is excluded; fixed stack reservations were not increased.
 
-## Functional tests
+## Host and PIO tests
 
-`bash tests/run_host_tests.sh` compiles the actual production helpers with
-AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer is disabled
-because it requires thread information under `/proc` that the build sandbox
-does not provide; this code does not allocate text buffers on the heap.
+`bash tests/run_host_tests.sh` passes with AddressSanitizer/UndefinedBehaviorSanitizer.
+LeakSanitizer is disabled for the sandbox; the renderer does not allocate heap
+buffers. Production text helpers pass **52,341 checks**, including live
+VRAM/font edits, geometries, font heights/strides/bit orders, page offsets,
+wrapping, attributes, cursor, invalid descriptors and allocation bounds.
 
-The text suite passes **52,341 checks**, covering:
+For each of four RGB/BGR and differential-polarity combinations, production
+codec functions pass:
 
-- writes to borrowed VRAM/font remaining visible without rebinding;
-- every visible scanline of the supported geometries and their borders;
-- 8-, 14-, and 16-line fonts, 32-byte font slots, and both bit orders;
-- page offsets, row pitch, VRAM wrapping, very large start addresses, and bounds;
-- foregrounds, bright backgrounds, attribute blink, and cursor shape/address;
-- clipped drawing and clearing, with guard bytes around the storage;
-- rejection of invalid descriptors without replacing the previous binding.
+- 1,024 symbol packing cases and 8,960 exact original graphics RGB round trips;
+- 256 independent foreground/background pairs, decoded and disparity-checked;
+- 64 in-place graphics/text/graphics workspace transitions with palette edits;
+- **786,432** glyph/attribute/width/bit-order/blink command combinations;
+- 20 solid-color/control commands.
 
-For **each** of four RGB/BGR and differential-polarity combinations, codec tests
-check the actual production functions, not a duplicate implementation:
+The independent PIO instruction simulator verifies **495,712 commands** and
+**3,965,696 palette addresses**. It also processes 8,000 pixels with randomized
+FIFO backpressure, including 147 empty-TX and 42,511 full-RX stalls, without
+loss/reordering. Unstalled throughput is exactly 59 instructions per eight
+pixels. All current SDK-generated PIO headers match the independently assembled
+12-instruction program. This is functional validation, not DMA/bus timing proof.
 
-- 1,024 symbol packing cases;
-- 8,960 exact original-graphics RGB round trips;
-- all 256 independent pairs of the 16 CGA text colors, decoded as TMDS and
-  checked for disparity balance;
-- 64 graphics/text/graphics workspace transitions, including full text-line
-  overwrites, palette edits while text is active, and guard bytes;
-- 262,144 glyph/attribute/width/bit-order combinations, checked against
-  individual expected pixel indices, including the odd/even phase bit.
+## Linked ARM execution and CPU comparison
 
-## Scanline code and timing review
+The tools in [tests/performance](../tests/performance/README.md) execute the
+actual linked RP2040 ELF in Unicorn and price instructions with the Arm M0+
+TRM. They do not simulate bus contention, peripheral timing, higher-priority
+interrupts or lock contention. Hardware exception entry/return is excluded.
 
-The scanline path uses SRAM-resident code. RP2040 divider helpers are also put
-in SRAM with `PICO_DIVIDER_IN_RAM=1`. Aligned word fill/copy loops avoid calls to
-flash-resident `memset`/`memcpy` on either chip. A recursive inspection of the
-linked IRQ's direct calls, tail branches, and linker veneers found no XIP code
-targets in either text demo or either runtime-feature comparison build.
+All **39 baseline and 67 optimized cases** pass independent pixel, memory-guard
+and r4..r11/SP preservation checks. Cases include font heights 8/14/16, stride
+32, both bit orders, unaligned byte-addressed VRAM/font, wrap, cursor, repeated
+blink transitions, and retained graphics-line duplication. Two further
+baseline cases establish dirty-divider stack use.
 
-The supplied ELF audit reports indirect/unresolved calls for review rather than
-assuming they are safe. Its result covers code addresses, not a caller-supplied
-font placed in flash. Keep the emulator's existing font in SRAM to preserve that
-property for data reads as well.
+Seven complete frames check **3,675 IRQ returns** and every physical output
+pixel with the same guards. No traced hot path fetches code or data from flash;
+the caller-provided test font and VRAM are in SRAM.
 
-Pixel expansion packs four output indices per 32-bit store using arithmetic
-masks. It adds no font/attribute LUT. Active lines fill only sync and porch
-regions before rendering the 640 active pixels, avoiding a second full-line
-write. These choices address a concrete RP2040 deadline problem found in the
-initial per-byte/O3-unrolled version.
+| Mode | Baseline cycles/frame | Optimized cycles/frame | Before → after, one 378 MHz core |
+|---|---:|---:|---:|
+| 80×30 | 4,046,765 | 1,145,686 | 64.23% → **18.19%** |
+| 80×25 | 3,511,965 | 1,024,166 | 55.75% → **16.26%** |
+| 40×25 | 3,431,965 | 886,166 | 54.48% → **14.07%** |
 
-At 378 MHz there are 12,000 system clocks per output line (about 31.75 us).
-Native text needs more frequent palette DMA chains than doubled graphics.
-Theoretical bandwidth and assembly review do not establish the real deadline
-margin under SRAM contention, other DMA traffic, XIP activity, or interrupt
-load. That remaining margin and serializer underrun must be measured on the
-target board with the real emulator running.
+The feature-heavy 80×30 frame with dirty-divider preservation on every IRQ uses
+1,257,738 ideal cycles, **19.96%**. Its longest sampled line is 4,126 cycles,
+10.92 us, versus a 31.746 us line period. These M0+ estimates do not apply to M33.
+See [HDMI_TEXT_PERFORMANCE.md](HDMI_TEXT_PERFORMANCE.md) for interpretation,
+RAM/stack limits, DMA counts, the XIP decision and profiling instructions.
 
-## Preview and patch checks
+## IRQ residency and firmware
 
-`bash tests/render_demo.sh OUTPUT_DIR` runs the real demo's screen construction,
-production text addressing/glyph helpers, and decoded production TMDS symbols.
-It writes 640 x 480 PPM previews for 80 x 30, 80 x 25, and 40 x 25. The archive's
-PNGs are lossless conversions of these outputs, not hardware captures.
+Seven optimized linked images pass recursive IRQ call-target audits: both
+text/3D demos, both controlled builds, both graphics demos and GPIO22 profiling.
+No reachable XIP function targets, unresolved targets or indirect calls require
+review. Code residency does not move a caller's flash font into SRAM.
 
-The delivery patch is checked with `git apply --check` against the exact clean
-base commit, then applied in that clean checkout. Its resulting source files
-are compared to the packaged source tree. The delivery includes SHA-256 hashes
-for the patch, source, firmware, previews, and validation files.
+The GPIO build uses inline SIO set/clear operations and clears the marker on
+every exit. The marker measures the IRQ body; hardware exception handling and
+the function prologue/epilogue remain outside it.
 
-## Hardware acceptance still required
+| Normal image | ELF SHA-256 | UF2 bytes |
+|---|---|---:|
+| RP2040 text/3D | `e17978ef4280295d62a40862b05a92f9c84fa9cbcdd70c697cdd71a5b168f7af` | 57,344 |
+| RP2350 text/3D | `0cf9785d1c12d0269980ded5c4202c26f1aa6468f6b2f2bbe9017c315f09fc13` | 58,880 |
 
-Confirm the three text geometries, one-pixel checker in 80-column modes, all
-16 backgrounds with attribute blink disabled, live font changes, blink/cursor,
-and graphics/text/graphics palette preservation. Measure the longest scanline
-handler duration and check the PIO transmit-stall flag while the emulator is
-under representative load. The RP2350 board test above confirms visible output,
-not a timing margin under emulator load.
+UF2 structure, chip families and image types pass validation. Current RP2350
+definitions include `PICO_EMBED_XIP_SETUP=1`, `PICO_FLASH_SPI_CLKDIV=4` and
+`PICO_FLASH_SPI_RXDELAY=4`. The archive contains detailed build reports, maps,
+metrics, logs, a controlled-memory harness and portable reproduction scripts.
+
+## Preview, patch and hardware check
+
+`bash tests/render_demo.sh OUTPUT_DIR` renders all three 640×480 previews using
+the actual demo and production helpers. Its virtual-clock test confirms changes
+at 0, 8, 16, 24 and 84 seconds and alternating graphics buffers. Supplied PNGs
+are software renders, not HDMI captures.
+
+The delivery workflow runs `git apply --check` against the exact baseline,
+applies the patch in an isolated checkout, and compares every resulting source
+file and executable bit with the packaged source. Results and SHA-256 hashes
+are included with the deliverables.
+
+On hardware, check the pixel checkerboard, foreground/background palette,
+live font changes, blink/cursor and graphics/text transitions. Measure profiling
+GPIO duty and peak duration with the actual emulator and inspect serializer
+underrun/stall behavior. The PIO programs now use 22 instruction words and
+require absolute addresses 0..11 on the address-converter PIO, normally PIO0.

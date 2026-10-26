@@ -1,7 +1,8 @@
 # Native HDMI text with borrowed VRAM and font
 
-This change targets the HDMI-only build of `vga-tv-hybrid`, starting at commit
-`7debfc46844b24d5c1979167b0e91847601ca68b`. It does not modify the NTSC driver or
+This performance revision targets the HDMI-only build of `vga-tv-hybrid`, at
+commit `34f401e07bb4ade91ec604512b086d9b368efad3`. It preserves the current
+RP2350 flash setup, GPIO12..19 assignment, and text/3D demo cycle. It does not modify the NTSC driver or
 enable simultaneous HDMI/NTSC output.
 
 ## Output modes
@@ -9,6 +10,9 @@ enable simultaneous HDMI/NTSC output.
 The physical signal is 640 x 480 at 60 Hz: 25.2 MHz pixels, 800 total pixels per
 line, and 525 lines per frame. The existing 378 MHz system clock, GPIO assignment,
 two PIO state machines, and four DMA channels remain in use.
+The fast text path uses 22 PIO instruction words: the glyph expander reserves
+absolute addresses 0..11 and the serializer uses ten more. Integrations sharing
+PIO0 must leave that instruction range free. Other PIO programs are not erased.
 
 | API mode | Text cells | Cell size with an 8 x 16 font | Visible area |
 |---|---:|---:|---|
@@ -174,14 +178,20 @@ same size. A union uses it differently for the two mutually exclusive modes:
 
 | Contents | Graphics layout | Text layout |
 |---|---:|---:|
-| TMDS palette address space | 4,096 B: 256 x 4 words | 2,048 B: 256 x 2 words |
-| Two indexed scanlines, including blanking | 800 B: 2 x 400 | 1,600 B: 2 x 800 |
+| TMDS palette address space | 4,096 B: 256 x 4 words | 512 B: 64 x 2 words |
+| Attribute-to-command lookup | within graphics entries | 1,024 B |
+| Glyph-bit/phase patterns, both bit orders | within graphics entries | 1,024 B |
+| Horizontally doubled nibble patterns | within graphics entries | 64 B |
+| Two scanlines, including blanking | 800 B: 2 x 400 indices | 800 B: 2 x 100 commands |
+| Attribute-table state and reserved gap | within graphics entries | 224 B |
 | Saved original graphics RGB values | within graphics entries | 768 B: 256 x 3 |
 | Layout occupied | **4,896 B** | **4,416 B** |
 | Actual union allocation | **4,896 B** | **4,896 B** |
 
-There is no 640 x 480 framebuffer, driver-owned text page, font cache, 256-attribute
-render table, or heap allocation for text. Compile-time assertions enforce the
+There is no 640 x 480 framebuffer, driver-owned text page, copied font, or heap
+allocation for text. The small lookup tables describe bit patterns and colors;
+they contain no cached characters or font bytes. They reuse existing workspace
+space instead of increasing the allocation. Compile-time assertions enforce the
 workspace size and overlap assumptions. The 4,096-byte alignment is inherited
 from the palette-address converter and can introduce linker padding; account
 for it in the actual ELF rather than summing C arrays alone.
@@ -199,10 +209,23 @@ restore order prevent overlapping writes from destroying palette entries.
 The HDMI receiver may briefly resynchronize at a graphics/text class change.
 Changing between text geometries keeps the same transport.
 
-In graphics there are 400 indices per complete line, each expanding to two
-physical pixels. In text there are 800 indices, each expanding to one physical
-pixel. The serializer clock is unchanged. Two DMA buffer addresses form a ring;
+In graphics there are 400 byte indices per complete line, each expanding to two
+physical pixels. In text there are 100 32-bit commands, each expanding to eight
+physical pixels. An 80-column cell uses one command per glyph scanline; a
+40-column cell uses two. The CPU reads the current VRAM cell and font byte,
+combines two small lookup results, and writes the command. The PIO program
+selects foreground/background and the alternating TMDS phase for every pixel.
+The serializer clock is unchanged. Two DMA buffer addresses form a ring;
 the IRQ prepares the buffer that is free while DMA consumes the other buffer.
+
+Blink is folded into the attribute lookup, with only its upper 128 entries
+updated when the blink state changes. A cursor patches one or two commands
+after the character loop. A row wrapping at the VRAM boundary is rendered as
+two contiguous spans. The inner loop has no cursor, blink, or wrapping branch.
+RP2040 uses short Thumb-1 loops; RP2350 uses the C versions.
+
+See [HDMI_TEXT_PERFORMANCE.md](HDMI_TEXT_PERFORMANCE.md) for before/after CPU
+traces, RAM accounting, the XIP decision, and on-board GPIO profiling.
 
 ### Reusing an existing graphics framebuffer too
 
@@ -259,6 +282,8 @@ It shares the renderer in `ntsc-tv.c`, supplies two 76,800-byte graphics buffers
 and disables the driver's built-in framebuffer. The SRAM
 divider setting is supplied by the HDMI interface target; carry that target
 setting over when integrating individual driver files into another build.
+The HDMI target also runs `pico_generate_pio_header()` for `hdmi_text.pio`;
+carry that generation step and its include directory into an external build.
 
 ## Reproducible checks and hardware limits
 
@@ -273,16 +298,22 @@ pin-order/polarity combinations. The preview command compiles the real demo
 and uses production text helpers plus decoded production TMDS symbols to write
 three 640 x 480 PPM images. These are **software renders**, not HDMI captures.
 
-ARM builds and host tests do not measure physical scanout deadlines. The text
-transport uses more, shorter palette DMA chains: about 100.8 million DMA
-transfers/second versus 75.6 million for doubled graphics, excluding line-control
-overhead. A complete line lasts about 31.75 microseconds (12,000 system clocks at
-378 MHz). Hardware validation must check serializer underrun and line preparation
-time under the emulator's real CPU, SRAM, flash, and DMA load.
+ARM builds, instruction traces and host tests do not measure physical scanout
+deadlines. The command transport requires 2,501 DMA transfers per complete line,
+including one line-control transfer: about 78.78 million transfers/second,
+compared with 100.83 million for the previous byte-per-pixel text implementation
+and 75.63 million for doubled graphics. A complete line lasts about 31.75
+microseconds (12,000 system clocks at 378 MHz). Hardware validation must check
+serializer underrun and line preparation time under the emulator's actual CPU,
+SRAM, flash, and DMA load. `HDMI_PROFILE_GPIO` optionally exposes the IRQ duration
+without adding counters, buffers, or logging inside the interrupt.
 
 The user confirmed working RP2350 M2P2 HDMI output on 2026-10-26 after enabling
 the embedded flash setup with divider 4 and read delay 4. This applies before
-the 378 MHz clock change; the default HDMI base pin is 12. Still check all
+the 378 MHz clock change; the default HDMI base pin is 12. That board result
+belongs to the previous byte-index transport. The new command transport has
+been built and model-checked, but has not yet been tested on a physical board.
+Still check all
 three geometries, the one-pixel checker in 80-column modes,
 the 16 backgrounds, live font edits, cursor/blink, and graphics/text/graphics
 transitions with a changed graphics palette. The system clock and voltage are

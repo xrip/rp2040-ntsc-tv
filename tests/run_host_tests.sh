@@ -32,4 +32,6 @@ for test_invert in 0 1; do
     done
 done
 
+python3 tests/test_hdmi_pio.py
+
 printf '%s\n' 'All host tests passed. These tests do not replace hardware timing validation.'

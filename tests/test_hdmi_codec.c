@@ -78,8 +78,8 @@ static void check_graphics(uint32_t color) {
 
 static unsigned check_workspace_transitions(void) {
     /* Exercise the production union and conversion helpers in place: the
-     * cache overlaps the final graphics LUT entries, then the full text LUT
-     * and both 800-byte text lines overwrite the old graphics transport.
+     * cache overlaps the final graphics LUT entries, then every text table,
+     * both command lines and all reserved bytes replace graphics transport.
      */
     struct {
         uint32_t before[4];
@@ -105,9 +105,25 @@ static unsigned check_workspace_transitions(void) {
                                     (uint32_t)cached[1] << 8 | cached[2];
             assert(actual == expected[i]);
         }
-        memset(guarded.storage.text.palette, 0x5a, sizeof guarded.storage.text.palette);
+        /* Poison the complete preceding region, not a duplicated list of
+         * offsets: future text-layout growth must not silently escape this
+         * test. Then run the production lookup initializer in the overlay.
+         */
+        memset(&guarded.storage, 0x5a,
+               offsetof(union hdmi_workspace, text.graphics_rgb));
+        hdmi_initialize_text_lookups(&guarded.storage);
         memset(guarded.storage.text.lines[0], 0x3c, sizeof guarded.storage.text.lines[0]);
         memset(guarded.storage.text.lines[1], 0xc3, sizeof guarded.storage.text.lines[1]);
+        guarded.storage.text.attribute_state = cycle;
+        memset((uint8_t *)&guarded.storage + sizeof guarded.storage.text, 0xc5,
+               sizeof guarded.storage - sizeof guarded.storage.text);
+
+        for (unsigned i = 0; i < HDMI_PALETTE_COLORS; ++i) {
+            const uint8_t *cached = guarded.storage.text.graphics_rgb[i];
+            const uint32_t actual = (uint32_t)cached[0] << 16 |
+                                    (uint32_t)cached[1] << 8 | cached[2];
+            assert(actual == expected[i]);
+        }
 
         /* Model palette writes while text is active, including entries whose
          * backing bytes used to hold the top of the graphics LUT.
@@ -133,47 +149,103 @@ static unsigned check_workspace_transitions(void) {
     return 64;
 }
 
-static unsigned check_packed_glyphs(void) {
+/* Independent scalar command decoder. PIO chooses the low foreground field
+ * or high background field using one glyph bit, then adds the pixel's phase
+ * as palette-index bit 5. Do not use a production pattern decoder here.
+ */
+static unsigned receive_command_pixel(uint32_t command, unsigned pixel) {
+    assert(pixel < 8u);
+    const unsigned foreground = command & 31u;
+    const unsigned background = command >> 27;
+    const unsigned pair = (command >> (8u + 2u * pixel)) & 3u;
+    return ((pair & 1u) ? foreground : background) + ((pair >> 1) * 32u);
+}
+
+static void check_command_fields(uint32_t command, unsigned foreground,
+                                 unsigned background) {
+    assert((command & 31u) == foreground);
+    assert((command >> 27) == background);
+    /* Bits 24..26 must be zero for the PIO background extraction. Bits 5..7
+     * are unused too, and must not leak from attributes/pattern expansion.
+     */
+    assert((command & UINT32_C(0x070000e0)) == 0u);
+    for (unsigned pixel = 0; pixel < 8u; ++pixel)
+        assert(((command >> (9u + 2u * pixel)) & 1u) == (pixel & 1u));
+}
+
+static unsigned check_text_commands(void) {
+    union hdmi_workspace storage;
+    memset(&storage, 0xa5, sizeof storage);
+    hdmi_initialize_text_lookups(&storage);
+    assert(storage.text.attribute_state == 0u);
+
     unsigned cases = 0;
-    for (unsigned glyph = 0; glyph < 256; ++glyph) {
-        for (unsigned attribute = 0; attribute < 256; ++attribute) {
-            const unsigned foreground = attribute & 15u;
-            const unsigned background = attribute >> 4;
-            const uint32_t packed_background = background * 0x01010101u;
-            const uint32_t difference = foreground ^ background;
-            for (unsigned wide = 0; wide < 2; ++wide) {
-                for (unsigned msb_first = 0; msb_first < 2; ++msb_first) {
-                    const unsigned words = wide ? 4 : 2;
-                    for (unsigned word = 0; word < words; ++word) {
-                        uint32_t packed;
-                        if (wide) {
-                            packed = msb_first
-                                    ? hdmi_text_two_doubled_pixels_reversed(
-                                          (uint8_t)(glyph << (word * 2)),
-                                          packed_background, difference)
-                                    : hdmi_text_two_doubled_pixels(glyph >> (word * 2),
-                                          packed_background, difference);
-                        } else {
-                            packed = msb_first
-                                    ? hdmi_text_four_pixels_reversed(glyph >> ((1u - word) * 4),
-                                          packed_background, difference)
-                                    : hdmi_text_four_pixels(glyph >> (word * 4),
-                                          packed_background, difference);
+    /* State zero deliberately uses the initializer's table without replacing
+     * it. States one/two exercise the same production attribute constructor
+     * used when the visible/hidden blink phase changes during scanout.
+     */
+    for (unsigned blink_state = 0; blink_state < 3; ++blink_state) {
+        const bool blink_enabled = blink_state != 0;
+        const bool blink_hidden = blink_state == 2;
+        if (blink_enabled) {
+            for (unsigned attribute = 0; attribute < 256; ++attribute)
+                storage.text.attributes[attribute] =
+                        hdmi_text_attribute_word(attribute, blink_enabled, blink_hidden);
+        }
+        for (unsigned glyph = 0; glyph < 256; ++glyph) {
+            for (unsigned attribute = 0; attribute < 256; ++attribute) {
+                const unsigned foreground = attribute & 15u;
+                const unsigned background = (attribute / 16u) % (blink_enabled ? 8u : 16u);
+                const bool hidden = blink_hidden && attribute >= 128u;
+                const unsigned command_foreground = hidden ? background : foreground;
+                const uint32_t colors = storage.text.attributes[attribute];
+                assert((colors & UINT32_C(0x07ffffe0)) == 0u);
+                assert((colors & 31u) == command_foreground);
+                assert((colors >> 27) == background);
+                for (unsigned wide = 0; wide < 2; ++wide) {
+                    for (unsigned msb_first = 0; msb_first < 2; ++msb_first) {
+                        const unsigned commands = wide ? 2u : 1u;
+                        for (unsigned word = 0; word < commands; ++word) {
+                            uint16_t pattern;
+                            if (wide) {
+                                const unsigned shift = 4u * (msb_first ? 1u - word : word);
+                                pattern = storage.text.wide_glyphs[msb_first][(glyph >> shift) & 15u];
+                            } else {
+                                pattern = storage.text.glyphs[msb_first][glyph];
+                            }
+                            const uint32_t command = colors | (uint32_t)pattern << 8;
+                            check_command_fields(command, command_foreground, background);
+                            for (unsigned subpixel = 0; subpixel < 8; ++subpixel) {
+                                const unsigned pixel = word * 8u + subpixel;
+                                unsigned bit = wide ? pixel / 2u : pixel;
+                                if (msb_first) bit = 7u - bit;
+                                const bool foreground_pixel = !hidden && (glyph & (1u << bit));
+                                const unsigned color = foreground_pixel ? foreground : background;
+                                const unsigned expected = color + ((pixel & 1u) ? 32u : 0u);
+                                assert(receive_command_pixel(command, subpixel) == expected);
+                            }
                         }
-                        for (unsigned byte = 0; byte < 4; ++byte) {
-                            const unsigned pixel = word * 4 + byte;
-                            unsigned bit = wide ? pixel / 2 : pixel;
-                            if (msb_first) bit = 7u - bit;
-                            const unsigned color = (glyph & (1u << bit))
-                                    ? foreground : background;
-                            const unsigned expected = color + ((pixel & 1u) ? 16u : 0u);
-                            assert(((packed >> (byte * 8)) & 255u) == expected);
-                        }
+                        ++cases;
                     }
-                    ++cases;
                 }
             }
         }
+    }
+    return cases;
+}
+
+static unsigned check_solid_commands(void) {
+    unsigned cases = 0;
+    /* Include all four control symbols (16..19), not just text colours.
+     * Both colour fields must contain the full five-bit control index, and
+     * each physical pixel must choose the corresponding phase-bank entry.
+     */
+    for (unsigned color = 0; color < 20u; ++color) {
+        const uint32_t command = hdmi_text_solid_command(color);
+        check_command_fields(command, color, color);
+        for (unsigned pixel = 0; pixel < 8u; ++pixel)
+            assert(receive_command_pixel(command, pixel) == color + (pixel & 1u) * 32u);
+        ++cases;
     }
     return cases;
 }
@@ -242,12 +314,15 @@ int main(void) {
         }
     }
     const unsigned workspace_cycles = check_workspace_transitions();
-    const unsigned packed_glyphs = check_packed_glyphs();
+    const unsigned text_commands = check_text_commands();
+    const unsigned solid_commands = check_solid_commands();
     printf("HDMI codec OK: %u packing cases, %u exact palette round trips, "
            "%u independent text pairs, %u in-place workspace cycles "
-           "and %u packed glyph/attribute cases "
+           "and %u command glyph/attribute/width/order/blink cases, "
+           "%u solid colour/control commands "
            "(invert=%d, RGB=%d)\n",
-           packing_cases, graphics_cases, text_pairs, workspace_cycles, packed_glyphs,
+           packing_cases, graphics_cases, text_pairs, workspace_cycles, text_commands,
+           solid_commands,
            HDMI_PIN_invert_diffpairs, HDMI_PIN_RGB_notBGR);
     return 0;
 }

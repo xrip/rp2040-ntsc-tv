@@ -11,6 +11,16 @@
 #include "graphics.h"
 #include "graphics_modes.h"
 #include "hdmi_codec.h"
+#include "hdmi_text.pio.h"
+
+#ifndef HDMI_PROFILE_GPIO
+#define HDMI_PROFILE_GPIO (-1)
+#endif
+#if HDMI_PROFILE_GPIO >= 0
+_Static_assert(HDMI_PROFILE_GPIO < NUM_BANK0_GPIOS &&
+               (HDMI_PROFILE_GPIO < HDMI_PIN_CLOCK || HDMI_PROFILE_GPIO >= HDMI_PIN_DATA + 6),
+               "HDMI profiling GPIO must be a valid, unused pin");
+#endif
 
 enum {
     HDMI_FRAME_WIDTH = 320,
@@ -19,17 +29,19 @@ enum {
     HDMI_TOTAL_SCANLINES = 525,
     HDMI_VSYNC_FIRST_LINE = 490,
     HDMI_VSYNC_LINES = 2,
-    HDMI_TEXT_HSYNC_BYTES = 96,
+    HDMI_TEXT_HSYNC_BYTES = 48, // twelve commands, eight physical pixels each
     HDMI_GRAPHICS_HSYNC_BYTES = 48,
-    HDMI_TEXT_ACTIVE_OFFSET = 144,
+    HDMI_TEXT_ACTIVE_OFFSET = 72,
     HDMI_GRAPHICS_ACTIVE_OFFSET = 72,
     HDMI_CTRL_BASE_INDEX = 252,
+    HDMI_TEXT_CTRL_BASE_INDEX = 16,
     HDMI_DEMO_REMAP_BASE_INDEX = 48
 };
 
 // Exactly the old driver's 4,896-byte allocation. The palette, lines and
 // cached graphics colours are overlaid only while all HDMI DMA is stopped.
-// No text VRAM, font, 640x480 framebuffer, or attribute LUT is allocated here.
+// Text command/attribute tables reuse space that the old text palette left
+// unused. No additional allocation, text VRAM, font or framebuffer is needed.
 static alignas(4096) union hdmi_workspace workspace;
 _Static_assert(sizeof(workspace) == HDMI_WORKSPACE_BYTES, "HDMI RAM budget changed");
 _Static_assert(sizeof(workspace.text) <= HDMI_WORKSPACE_BYTES, "Text exceeds existing workspace");
@@ -81,13 +93,8 @@ static inline void hdmi_leave(uint32_t state) {
 static const uint16_t pio_instructions_address_converter[] = {
     0x80a0, // pull block
     0x40e8, // in osr, 8
-    0x4034, // in x, 20 (patched to 21 for 8-byte, single-pixel text entries)
+    0x4034, // in x, 20 (graphics palette: sixteen bytes per doubled pixel)
     0x8020, // push block
-};
-static const struct pio_program pio_program_address_converter = {
-    .instructions = pio_instructions_address_converter,
-    .length = 4,
-    .origin = -1,
 };
 
 static const uint16_t pio_instructions_hdmi_output[] = {
@@ -118,7 +125,8 @@ static void hdmi_write_controls(void) {
         // Negative H/V polarity: blank uses CTL=3; H pulse uses CTL=2.
         const uint64_t packed = hdmi_pack_symbols(symbols[0], symbols[0], symbols[3 - i]);
         if (text_mode) {
-            hdmi_store_pixel(workspace.text.palette[HDMI_CTRL_BASE_INDEX + i], packed);
+            for (unsigned phase = 0; phase < 2; ++phase)
+                hdmi_store_pixel(workspace.text.palette[HDMI_TEXT_CTRL_BASE_INDEX + i + phase * 32], packed);
         } else {
             uint32_t *entry = workspace.graphics.palette[HDMI_CTRL_BASE_INDEX + i];
             hdmi_store_pixel(entry, packed);
@@ -133,9 +141,10 @@ static void hdmi_change_workspace_mode(bool want_text) {
         hdmi_cache_graphics_palette(&workspace);
         for (unsigned color = 0; color < 16; ++color) {
             for (unsigned phase = 0; phase < 2; ++phase)
-                hdmi_store_pixel(workspace.text.palette[color + phase * 16],
+                hdmi_store_pixel(workspace.text.palette[color + phase * 32],
                                   hdmi_text_pixel(GRAPHICS_CGA_RGB(color), phase));
         }
+        hdmi_initialize_text_lookups(&workspace);
     } else if (!want_text && text_mode) {
         hdmi_restore_graphics_palette(&workspace);
     }
@@ -149,12 +158,16 @@ static void hdmi_change_workspace_mode(bool want_text) {
 // bytes. may_alias permits word accesses to the uint8_t line arrays.
 typedef uint32_t hdmi_line_word_t __attribute__((may_alias));
 
-static __force_inline void hdmi_fill_line(uint8_t *destination, uint8_t value,
-                                         unsigned bytes) {
+static __force_inline void hdmi_fill_words(uint8_t *destination,
+                                         uint32_t word, unsigned bytes) {
     volatile hdmi_line_word_t *output = (volatile hdmi_line_word_t *)destination;
-    const uint32_t word = (uint32_t)value * UINT32_C(0x01010101);
 #pragma GCC unroll 1
     for (unsigned i = 0; i < bytes / 4u; ++i) output[i] = word;
+}
+
+static __force_inline void hdmi_fill_line(uint8_t *destination, uint8_t value,
+                                         unsigned bytes) {
+    hdmi_fill_words(destination, (uint32_t)value * UINT32_C(0x01010101), bytes);
 }
 
 static __force_inline void hdmi_copy_line(uint8_t *destination,
@@ -165,49 +178,195 @@ static __force_inline void hdmi_copy_line(uint8_t *destination,
     for (unsigned i = 0; i < bytes / 4u; ++i) output[i] = input[i];
 }
 
+static __attribute__((noinline, noclone))
+void __time_critical_func(hdmi_update_text_attributes)(unsigned state) {
+    // Only attributes with bit 7 set change. Folding blink into the colour
+    // table removes a conditional from every character of every scanline.
+#pragma GCC unroll 1
+    for (unsigned attribute = 128; attribute < 256; ++attribute)
+        workspace.text.attributes[attribute] =
+                hdmi_text_attribute_word(attribute, state & 1u, state & 2u);
+    workspace.text.attribute_state = state;
+}
+
+// Keep a fixed ABI at the hot kernels. The Thumb blocks explicitly preserve
+// r8/r9 too: these registers belong to the interrupted application. Their
+// temporary stack slots exist only inside a single asm block, with no calls.
+static __attribute__((noipa))
+void __time_critical_func(hdmi_text_span_80)(uint8_t *output,
+        const uint8_t *cells, unsigned count, const struct graphics_text_line *text) {
+    const uint8_t *font = text->font + text->glyph_line;
+    const unsigned stride = text->font_stride;
+    const uint16_t *patterns = workspace.text.glyphs[text->msb_first];
+    const uint32_t *colors = workspace.text.attributes;
+    const uint8_t *end = cells + count * 2u;
+    volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
+#if PICO_RP2040 && defined(__arm__)
+    // Cortex-M0+ has only eight low registers. Keep the loop bound in r8 so
+    // GCC cannot spill the stride and LUT pointers on every character. This
+    // Thumb-1 loop needs 21 ideal core clocks/cell, including the taken branch.
+    if (count == 0) return;
+    register const uint8_t *limit __asm("r12") = end;
+    uint32_t glyph, attribute;
+    __asm volatile (
+        ".syntax unified\n"
+        "mov %[glyph], r8\n"
+        "push {%[glyph]}\n"
+        "mov r8, %[limit]\n"
+        "1:\n"
+        "ldrb %[glyph], [%[cells], #0]\n"
+        "muls %[glyph], %[stride]\n"
+        "ldrb %[glyph], [%[font], %[glyph]]\n"
+        "lsls %[glyph], %[glyph], #1\n"
+        "ldrh %[glyph], [%[patterns], %[glyph]]\n"
+        "lsls %[glyph], %[glyph], #8\n"
+        "ldrb %[attribute], [%[cells], #1]\n"
+        "lsls %[attribute], %[attribute], #2\n"
+        "ldr %[attribute], [%[colors], %[attribute]]\n"
+        "orrs %[glyph], %[attribute]\n"
+        "stmia %[words]!, {%[glyph]}\n"
+        "adds %[cells], %[cells], #2\n"
+        "cmp %[cells], r8\n"
+        "bne 1b\n"
+        "pop {%[glyph]}\n"
+        "mov r8, %[glyph]\n"
+        ".syntax divided\n"
+        : [words] "+&l" (words), [cells] "+&l" (cells),
+          [glyph] "=&l" (glyph), [attribute] "=&l" (attribute)
+        : [font] "l" (font), [stride] "l" (stride),
+          [patterns] "l" (patterns), [colors] "l" (colors), [limit] "r" (limit)
+        : "r8", "cc", "memory"
+    );
+#else
+#pragma GCC unroll 1
+    while (cells != end) {
+        const unsigned glyph = font[(unsigned)cells[0] * stride];
+        *words++ = colors[cells[1]] | (uint32_t)patterns[glyph] << 8;
+        cells += 2;
+    }
+#endif
+}
+
+static __attribute__((noipa))
+void __time_critical_func(hdmi_text_span_40)(uint8_t *output,
+        const uint8_t *cells, unsigned count, const struct graphics_text_line *text) {
+    const uint8_t *font = text->font + text->glyph_line;
+    const unsigned stride = text->font_stride;
+    const uint16_t *patterns = workspace.text.wide_glyphs[text->msb_first];
+    const uint32_t *colors = workspace.text.attributes;
+    const uint8_t *end = cells + count * 2u;
+    volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
+#if PICO_RP2040 && defined(__arm__)
+    if (count == 0) return;
+    register const uint8_t *limit __asm("r12") = end;
+    uint32_t glyph, attribute;
+    // As in the 80-column loop, no stack loads occur inside the hot loop.
+    // Two fixed nibble orders avoid variable shifts and per-cell branches.
+#define HDMI_WIDE_LOW_NIBBLE \
+        "lsls %[glyph], %[glyph], #28\n" \
+        "lsrs %[glyph], %[glyph], #27\n"
+#define HDMI_WIDE_HIGH_NIBBLE \
+        "lsrs %[glyph], %[glyph], #4\n" \
+        "lsls %[glyph], %[glyph], #1\n"
+#define HDMI_WIDE_LOOP(first, second) \
+    __asm volatile ( \
+        ".syntax unified\n" \
+        "mov %[glyph], r8\n" \
+        "push {%[glyph]}\n" \
+        "mov %[attribute], r9\n" \
+        "push {%[attribute]}\n" \
+        "mov r8, %[limit]\n" \
+        "1:\n" \
+        "ldrb %[glyph], [%[cells], #0]\n" \
+        "muls %[glyph], %[stride]\n" \
+        "ldrb %[glyph], [%[font], %[glyph]]\n" \
+        "mov r9, %[glyph]\n" \
+        "ldrb %[attribute], [%[cells], #1]\n" \
+        "lsls %[attribute], %[attribute], #2\n" \
+        "ldr %[attribute], [%[colors], %[attribute]]\n" \
+        first \
+        "ldrh %[glyph], [%[patterns], %[glyph]]\n" \
+        "lsls %[glyph], %[glyph], #8\n" \
+        "orrs %[glyph], %[attribute]\n" \
+        "str %[glyph], [%[words], #0]\n" \
+        "mov %[glyph], r9\n" \
+        second \
+        "ldrh %[glyph], [%[patterns], %[glyph]]\n" \
+        "lsls %[glyph], %[glyph], #8\n" \
+        "orrs %[glyph], %[attribute]\n" \
+        "str %[glyph], [%[words], #4]\n" \
+        "adds %[words], %[words], #8\n" \
+        "adds %[cells], %[cells], #2\n" \
+        "cmp %[cells], r8\n" \
+        "bne 1b\n" \
+        "pop {%[attribute]}\n" \
+        "mov r9, %[attribute]\n" \
+        "pop {%[glyph]}\n" \
+        "mov r8, %[glyph]\n" \
+        ".syntax divided\n" \
+        : [words] "+&l" (words), [cells] "+&l" (cells), \
+          [glyph] "=&l" (glyph), [attribute] "=&l" (attribute) \
+        : [font] "l" (font), [stride] "l" (stride), \
+          [patterns] "l" (patterns), [colors] "l" (colors), [limit] "r" (limit) \
+        : "r8", "r9", "cc", "memory" \
+    )
+    if (text->msb_first) {
+        HDMI_WIDE_LOOP(HDMI_WIDE_HIGH_NIBBLE, HDMI_WIDE_LOW_NIBBLE);
+    } else {
+        HDMI_WIDE_LOOP(HDMI_WIDE_LOW_NIBBLE, HDMI_WIDE_HIGH_NIBBLE);
+    }
+#undef HDMI_WIDE_LOOP
+#undef HDMI_WIDE_HIGH_NIBBLE
+#undef HDMI_WIDE_LOW_NIBBLE
+#else
+    const unsigned first_shift = text->msb_first ? 4u : 0u;
+    const unsigned second_shift = first_shift ^ 4u;
+#pragma GCC unroll 1
+    while (cells != end) {
+        const unsigned glyph = font[(unsigned)cells[0] * stride];
+        const uint32_t color = colors[cells[1]];
+        words[0] = color | (uint32_t)patterns[(glyph >> first_shift) & 15u] << 8;
+        words[1] = color | (uint32_t)patterns[(glyph >> second_shift) & 15u] << 8;
+        words += 2;
+        cells += 2;
+    }
+#endif
+}
+
 static __force_inline void hdmi_render_text(unsigned line, uint8_t *output) {
     struct graphics_text_line text;
-    volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
     if (!graphics_text_line(line, HDMI_ACTIVE_SCANLINES, &text)) {
-#pragma GCC unroll 1
-        for (unsigned i = 0; i < 160; ++i) *words++ = UINT32_C(0x10001000);
+        hdmi_fill_words(output, hdmi_text_solid_command(0), 320);
         return;
     }
-    const bool wide = text.columns == 40;
-    const bool msb_first = text.msb_first;
-    // Keep the shared glyph API unchanged: this private snapshot asks for
-    // raw font bit order, which the packed emitters handle directly.
-    text.msb_first = false;
-    for (unsigned column = 0; column < text.columns; ++column) {
-        const uint16_t cell = graphics_text_cell(&text, column);
-        const uint8_t character = (uint8_t)cell;
-        const uint8_t attribute = (uint8_t)(cell >> 8);
-        const uint8_t fg = attribute & 15u;
-        const uint8_t bg = (attribute >> 4) & (text.blink_enabled ? 7u : 15u);
-        uint8_t glyph = graphics_text_glyph(&text, column, character, attribute);
-        const uint32_t background = (uint32_t)bg * UINT32_C(0x01010101);
-        const uint32_t difference = fg ^ bg;
-        if (wide) {
-            if (msb_first) {
-#pragma GCC unroll 1
-                for (unsigned pair = 0; pair < 4; ++pair) {
-                    *words++ = hdmi_text_two_doubled_pixels_reversed(glyph, background, difference);
-                    glyph <<= 2;
-                }
-            } else {
-#pragma GCC unroll 1
-                for (unsigned pair = 0; pair < 4; ++pair) {
-                    *words++ = hdmi_text_two_doubled_pixels(glyph, background, difference);
-                    glyph >>= 2;
-                }
-            }
-        } else if (msb_first) {
-            *words++ = hdmi_text_four_pixels_reversed(glyph >> 4, background, difference);
-            *words++ = hdmi_text_four_pixels_reversed(glyph, background, difference);
-        } else {
-            *words++ = hdmi_text_four_pixels(glyph, background, difference);
-            *words++ = hdmi_text_four_pixels(glyph >> 4, background, difference);
-        }
+    const unsigned state = text.blink_enabled ? (text.blink_hidden ? 3u : 1u) : 0u;
+    if (state != workspace.text.attribute_state) hdmi_update_text_attributes(state);
+    // A wrapped VRAM row consists of at most two spans; the API validates
+    // even sizes and offsets. Byte loads also support an unaligned VRAM base.
+    const unsigned first = text.wrap_at / 2u < text.columns
+            ? (unsigned)(text.wrap_at / 2u) : text.columns;
+    const unsigned bytes_per_cell = text.columns == 40 ? 8u : 4u;
+    if (text.columns == 40) {
+        hdmi_text_span_40(output, text.cells, first, &text);
+        if (first != text.columns)
+            hdmi_text_span_40(output + first * bytes_per_cell, text.wrap_cells,
+                              text.columns - first, &text);
+    } else {
+        hdmi_text_span_80(output, text.cells, first, &text);
+        if (first != text.columns)
+            hdmi_text_span_80(output + first * bytes_per_cell, text.wrap_cells,
+                              text.columns - first, &text);
+    }
+    // The cursor overrides the glyph, including a blinking glyph. Patch just
+    // its one/two commands instead of testing the cursor in every cell.
+    if (text.cursor_visible) {
+        const unsigned attribute = graphics_text_cell(&text, text.cursor_column) >> 8;
+        const uint32_t command = hdmi_text_attribute_word(attribute, text.blink_enabled, false) |
+                                 UINT32_C(0x00dddd00); // eight foreground pixels
+        volatile hdmi_line_word_t *cursor =
+                (volatile hdmi_line_word_t *)(output + text.cursor_column * bytes_per_cell);
+        cursor[0] = command;
+        if (text.columns == 40) cursor[1] = command;
     }
 }
 
@@ -225,20 +384,30 @@ static void __time_critical_func(hdmi_prepare_line)(unsigned line, unsigned buff
         hdmi_copy_line(dest, workspace.graphics.lines[buffer ^ 1u], 400);
         return;
     }
-    const uint8_t blank = HDMI_CTRL_BASE_INDEX + (vsync ? 2 : 0);
-    hdmi_fill_line(dest, blank + 1u, hsync);
+    const uint8_t blank = (text_mode ? HDMI_TEXT_CTRL_BASE_INDEX : HDMI_CTRL_BASE_INDEX) +
+                          (vsync ? 2 : 0);
+    if (text_mode) hdmi_fill_words(dest, hdmi_text_solid_command(blank + 1u), hsync);
+    else hdmi_fill_line(dest, blank + 1u, hsync);
     if (line >= HDMI_ACTIVE_SCANLINES) {
-        hdmi_fill_line(dest + hsync, blank, total - hsync);
+        if (text_mode) hdmi_fill_words(dest + hsync, hdmi_text_solid_command(blank), total - hsync);
+        else hdmi_fill_line(dest + hsync, blank, total - hsync);
         return;
     }
     // The renderer writes every active pixel. Fill just the porches instead
-    // of writing the entire line twice (160 instead of 800 bytes in text).
+    // of writing the entire line twice (80 instead of 400 command bytes).
     const unsigned active_offset = text_mode ? HDMI_TEXT_ACTIVE_OFFSET :
                                               HDMI_GRAPHICS_ACTIVE_OFFSET;
-    const unsigned active_bytes = text_mode ? HDMI_FRAME_WIDTH * 2u : HDMI_FRAME_WIDTH;
-    hdmi_fill_line(dest + hsync, blank, active_offset - hsync);
-    hdmi_fill_line(dest + active_offset + active_bytes, blank,
-                   total - active_offset - active_bytes);
+    const unsigned active_bytes = HDMI_FRAME_WIDTH;
+    if (text_mode) {
+        const uint32_t command = hdmi_text_solid_command(blank);
+        hdmi_fill_words(dest + hsync, command, active_offset - hsync);
+        hdmi_fill_words(dest + active_offset + active_bytes, command,
+                           total - active_offset - active_bytes);
+    } else {
+        hdmi_fill_line(dest + hsync, blank, active_offset - hsync);
+        hdmi_fill_line(dest + active_offset + active_bytes, blank,
+                       total - active_offset - active_bytes);
+    }
     if (text_mode) {
         hdmi_render_text(line, dest + HDMI_TEXT_ACTIVE_OFFSET);
     } else {
@@ -254,11 +423,17 @@ static void __time_critical_func(hdmi_prepare_line)(unsigned line, unsigned buff
 }
 
 static void __time_critical_func(hdmi_scanline_interrupt_handler)(void) {
+#if HDMI_PROFILE_GPIO >= 0
+    gpio_put(HDMI_PROFILE_GPIO, true);
+#endif
     // NVIC pending state is per-core. A reconfiguration requested by the
     // other core must not turn a stale pending IRQ into a fictitious line.
     const uint32_t irq_state = hdmi_enter();
     if (!(dma_hw->ints0 & (1u << dma_channel_control))) {
         hdmi_leave(irq_state);
+#if HDMI_PROFILE_GPIO >= 0
+        gpio_put(HDMI_PROFILE_GPIO, false);
+#endif
         return;
     }
     dma_hw->ints0 = 1u << dma_channel_control;
@@ -281,6 +456,9 @@ static void __time_critical_func(hdmi_scanline_interrupt_handler)(void) {
             (uintptr_t)&dma_buffer_addresses[0] ? 0u : 1u;
     hdmi_prepare_line(next_line, next_buffer);
     hdmi_leave(irq_state);
+#if HDMI_PROFILE_GPIO >= 0
+    gpio_put(HDMI_PROFILE_GPIO, false);
+#endif
 }
 
 static void hdmi_stop_output(void) {
@@ -306,17 +484,26 @@ static void hdmi_stop_output(void) {
 }
 
 static void hdmi_start_output(void) {
-    const unsigned stride_shift = text_mode ? 11 : 12;
-    PIO_VIDEO_ADDR->instr_mem[pio_program_offset_converter + 2] =
-            pio_encode_in(pio_x, text_mode ? 21 : 20);
+    // The same twelve reserved PIO words hold the glyph expander in text
+    // mode or the original four-word address converter in graphics mode.
+    const unsigned program_length = text_mode ? hdmi_text_program.length : 4u;
+    const uint16_t *instructions = text_mode ? hdmi_text_program.instructions :
+                                              pio_instructions_address_converter;
+    for (unsigned i = 0; i < program_length; ++i)
+        PIO_VIDEO_ADDR->instr_mem[pio_program_offset_converter + i] = instructions[i];
     pio_sm_config config = pio_get_default_sm_config();
-    sm_config_set_wrap(&config, pio_program_offset_converter, pio_program_offset_converter + 3);
-    sm_config_set_in_shift(&config, true, false, 32);
-    pio_sm_init(PIO_VIDEO_ADDR, sm_address_converter, pio_program_offset_converter, &config);
+    sm_config_set_wrap(&config, pio_program_offset_converter,
+                       pio_program_offset_converter + program_length - 1u);
+    sm_config_set_in_shift(&config, true, text_mode, text_mode ? 24 : 32);
+    sm_config_set_out_shift(&config, true, false, text_mode ? 24 : 32);
+    pio_sm_init(PIO_VIDEO_ADDR, sm_address_converter,
+                pio_program_offset_converter + (text_mode ? hdmi_text_offset_entry : 0u), &config);
     pio_sm_put_blocking(PIO_VIDEO_ADDR, sm_address_converter,
-                         (uint32_t)(uintptr_t)&workspace >> stride_shift);
+                         (uint32_t)(uintptr_t)&workspace >> (text_mode ? 9 : 12));
     pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter, pio_encode_pull(false, true));
-    pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter, pio_encode_mov(pio_x, pio_osr));
+    pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter,
+                pio_encode_mov(text_mode ? pio_y : pio_x, pio_osr));
+    pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter, pio_encode_mov(pio_isr, pio_null));
 
     config = pio_get_default_sm_config();
     sm_config_set_wrap(&config, pio_program_offset_video, pio_program_offset_video + 9);
@@ -338,7 +525,7 @@ static void hdmi_start_output(void) {
     }
 
     dma_channel_config dma_config = dma_channel_get_default_config(dma_channel_data);
-    channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_8);
+    channel_config_set_transfer_data_size(&dma_config, text_mode ? DMA_SIZE_32 : DMA_SIZE_8);
     channel_config_set_read_increment(&dma_config, true);
     channel_config_set_write_increment(&dma_config, false);
     channel_config_set_chain_to(&dma_config, dma_channel_control);
@@ -347,7 +534,7 @@ static void hdmi_start_output(void) {
     dma_channel_configure(dma_channel_data, &dma_config,
                           &PIO_VIDEO_ADDR->txf[sm_address_converter],
                           (const void *)(uintptr_t)dma_buffer_addresses[0],
-                          text_mode ? 800 : 400, false);
+                          text_mode ? 100 : 400, false);
 
     dma_config = dma_channel_get_default_config(dma_channel_control);
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32);
@@ -459,7 +646,9 @@ void hdmi_graphics_init(void) {
     dma_channel_data = dma_claim_unused_channel(true);
     dma_channel_palette_control = dma_claim_unused_channel(true);
     dma_channel_palette_data = dma_claim_unused_channel(true);
-    pio_program_offset_converter = pio_add_program(PIO_VIDEO_ADDR, &pio_program_address_converter);
+    // OUT PC,1 dispatches to absolute addresses 0/1, so the text program
+    // explicitly reserves instructions 0..11. Serializer uses ten more.
+    pio_program_offset_converter = pio_add_program(PIO_VIDEO_ADDR, &hdmi_text_program);
     pio_program_offset_video = pio_add_program(PIO_VIDEO, &pio_program_hdmi_output);
 
     for (unsigned i = 0; i < 2; ++i) {
@@ -472,6 +661,11 @@ void hdmi_graphics_init(void) {
         gpio_set_drive_strength(HDMI_PIN_DATA + i, GPIO_DRIVE_STRENGTH_12MA);
         gpio_set_slew_rate(HDMI_PIN_DATA + i, GPIO_SLEW_RATE_FAST);
     }
+#if HDMI_PROFILE_GPIO >= 0
+    gpio_init(HDMI_PROFILE_GPIO);
+    gpio_set_dir(HDMI_PROFILE_GPIO, GPIO_OUT);
+    gpio_put(HDMI_PROFILE_GPIO, false);
+#endif
     pio_sm_set_pins_with_mask(PIO_VIDEO, sm_video_output,
                              3u << HDMI_PIN_CLOCK, 3u << HDMI_PIN_CLOCK);
     pio_sm_set_consecutive_pindirs(PIO_VIDEO, sm_video_output, HDMI_PIN_CLOCK, 2, true);
