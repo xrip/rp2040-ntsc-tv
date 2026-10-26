@@ -51,6 +51,7 @@ void graphics_init(void) {
     graphics_prepare_clock();
 
 #if defined(HDMI)
+    graphics_text_init();
     hdmi_graphics_init();
 #elif defined(NTSC_TV)
     ntsc_composite_graphics_init();
@@ -63,13 +64,17 @@ void graphics_init(void) {
 #endif
 }
 
-void draw_text(const char string[2*TEXTMODE_COLS + 1], uint32_t x, uint32_t y, uint8_t color, uint8_t bgcolor) {
+void draw_text(const char *string, uint32_t x, uint32_t y, uint8_t color, uint8_t bgcolor) {
+#if defined(HDMI)
+    graphics_text_draw(string, x, y, color, bgcolor);
+#else
     uint8_t *t_buf = text_buffer + TEXTMODE_COLS * 2 * y + 2 * x;
     for (int xi = TEXTMODE_COLS * 2; xi--;) {
         if (!*string) break;
         *t_buf++ = *string++;
         *t_buf++ = bgcolor << 4 | color & 0xF;
     }
+#endif
 }
 
 void draw_window(const char title[2*TEXTMODE_COLS + 1], uint32_t x, uint32_t y, uint32_t width, uint32_t height) {

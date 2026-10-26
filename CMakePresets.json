@@ -70,6 +70,28 @@
       }
     },
     {
+      "name": "rp2040-hdmi-text",
+      "displayName": "RP2040 / HDMI text palette",
+      "inherits": "rp2040-hdmi",
+      "binaryDir": "${sourceDir}/cmake-build-rp2040-hdmi-text",
+      "cacheVariables": {
+        "PICOTOOL_FETCH_FROM_GIT_PATH": "${sourceDir}/cmake-build-tools/picotool",
+        "HDMI_TEXT_DEMO": "ON",
+        "GRAPHICS_BUILTIN_FRAMEBUFFER": "OFF"
+      }
+    },
+    {
+      "name": "rp2350-hdmi-text",
+      "displayName": "RP2350 / HDMI text palette",
+      "inherits": "rp2350-hdmi",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-hdmi-text",
+      "cacheVariables": {
+        "PICOTOOL_FETCH_FROM_GIT_PATH": "${sourceDir}/cmake-build-tools/picotool",
+        "HDMI_TEXT_DEMO": "ON",
+        "GRAPHICS_BUILTIN_FRAMEBUFFER": "OFF"
+      }
+    },
+    {
       "name": "rp2040-tft",
       "displayName": "RP2040 / TFT",
       "inherits": "rp2040",

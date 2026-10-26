@@ -9,576 +9,504 @@
 #include <hardware/sync.h>
 
 #include "graphics.h"
+#include "graphics_modes.h"
+#include "hdmi_codec.h"
 
 enum {
     HDMI_FRAME_WIDTH = 320,
     HDMI_FRAME_HEIGHT = 240,
-    HDMI_ACTIVE_SCANLINES = HDMI_FRAME_HEIGHT * 2,
+    HDMI_ACTIVE_SCANLINES = 480,
     HDMI_TOTAL_SCANLINES = 525,
     HDMI_VSYNC_FIRST_LINE = 490,
     HDMI_VSYNC_LINES = 2,
+    HDMI_TEXT_HSYNC_BYTES = 96,
+    HDMI_GRAPHICS_HSYNC_BYTES = 48,
+    HDMI_TEXT_ACTIVE_OFFSET = 144,
+    HDMI_GRAPHICS_ACTIVE_OFFSET = 72,
     HDMI_CTRL_BASE_INDEX = 252,
     HDMI_DEMO_REMAP_BASE_INDEX = 48
 };
 
-//PIO параметры
-static uint pio_program_offset_video = 0;
-static uint pio_program_offset_converter = 0;
+// Exactly the old driver's 4,896-byte allocation. The palette, lines and
+// cached graphics colours are overlaid only while all HDMI DMA is stopped.
+// No text VRAM, font, 640x480 framebuffer, or attribute LUT is allocated here.
+static alignas(4096) union hdmi_workspace workspace;
+_Static_assert(sizeof(workspace) == HDMI_WORKSPACE_BYTES, "HDMI RAM budget changed");
+_Static_assert(sizeof(workspace.text) <= HDMI_WORKSPACE_BYTES, "Text exceeds existing workspace");
+_Static_assert(offsetof(union hdmi_workspace, graphics.lines) % 4u == 0u &&
+               offsetof(union hdmi_workspace, text.lines) % 4u == 0u &&
+               sizeof(workspace.graphics.lines[0]) % 4u == 0u &&
+               sizeof(workspace.text.lines[0]) % 4u == 0u,
+               "HDMI line helpers require aligned, whole-word buffers");
+_Static_assert(HDMI_TEXT_HSYNC_BYTES % 4u == 0u &&
+               HDMI_GRAPHICS_HSYNC_BYTES % 4u == 0u &&
+               HDMI_TEXT_ACTIVE_OFFSET % 4u == 0u &&
+               HDMI_GRAPHICS_ACTIVE_OFFSET % 4u == 0u &&
+               HDMI_FRAME_WIDTH % 4u == 0u,
+               "HDMI line fill regions must span aligned, whole words");
 
-//SM
-static int sm_video_output = -1;
-static int sm_address_converter = -1;
-
-//графический буфер
+#ifndef GRAPHICS_NO_BUILTIN_FRAMEBUFFER
 static uint8_t hdmi_primary_framebuffer[HDMI_FRAME_WIDTH * HDMI_FRAME_HEIGHT]
         __attribute__((aligned(4)));
+#endif
 static const uint8_t *graphics_framebuffer;
 static const uint8_t *volatile pending_framebuffer;
+static volatile uint16_t hdmi_current_scanline;
+static bool initialized;
+static bool palette_initialized;
+static bool text_mode;
+static spin_lock_t *hdmi_lock;
 
-//текстовый буфер
-uint8_t *text_buffer = NULL;
-
-
-//DMA каналы
-//каналы работы с первичным графическим буфером
+static uint pio_program_offset_video;
+static uint pio_program_offset_converter;
+static int sm_video_output;
+static int sm_address_converter;
 static int dma_channel_control;
 static int dma_channel_data;
-//каналы работы с конвертацией палитры
 static int dma_channel_palette_control;
 static int dma_channel_palette_data;
 
-//DMA буферы
-//основные строчные данные
-static uint32_t *scanline_buffers[2] = { NULL,NULL };
-static uint32_t *dma_buffer_addresses[2];
+// The control channel advances through this ring itself. The IRQ fills the
+// next buffer, never the buffer whose pointer has just been consumed by DMA.
+static alignas(8) uint32_t dma_buffer_addresses[2];
 
-//ДМА палитра для конвертации
-//в хвосте этой памяти выделяется dma_data
-static alignas(4096) uint32_t tmds_palette_buffer[1224];
+static inline uint32_t hdmi_enter(void) {
+    return hdmi_lock != NULL ? spin_lock_blocking(hdmi_lock) : 0;
+}
 
+static inline void hdmi_leave(uint32_t state) {
+    if (hdmi_lock != NULL) spin_unlock(hdmi_lock, state);
+}
 
-/**
- * PIO program for address conversion in palette lookup
- * This program converts 8-bit palette indices to TMDS-encoded RGB data
- */
-uint16_t pio_instructions_address_converter[] = {
-    0x80a0, //  0: pull   block           ; Get palette index from DMA
-    0x40e8, //  1: in     osr, 8          ; Shift 8 bits into ISR
-    0x4034, //  2: in     x, 20           ; Shift 20 bits from X (base address)
-    0x8020, //  3: push   block           ; Push converted address to output
+static const uint16_t pio_instructions_address_converter[] = {
+    0x80a0, // pull block
+    0x40e8, // in osr, 8
+    0x4034, // in x, 20 (patched to 21 for 8-byte, single-pixel text entries)
+    0x8020, // push block
 };
-
-
-const struct pio_program pio_program_address_converter = {
+static const struct pio_program pio_program_address_converter = {
     .instructions = pio_instructions_address_converter,
     .length = 4,
     .origin = -1,
 };
 
-/**
- * PIO program for HDMI video output
- * Outputs 6 bits per clock cycle with proper side-set clock generation
- */
-const uint16_t pio_instructions_hdmi_output[] = {
-    0x7006, //  0: out    pins, 6         side 2  ; Output 6 data bits, clock high
-    0x7006, //  1: out    pins, 6         side 2  ; Output 6 data bits, clock high
-    0x7006, //  2: out    pins, 6         side 2  ; Output 6 data bits, clock high
-    0x7006, //  3: out    pins, 6         side 2  ; Output 6 data bits, clock high
-    0x7006, //  4: out    pins, 6         side 2  ; Output 6 data bits, clock high
-    0x6806, //  5: out    pins, 6         side 1  ; Output 6 data bits, clock low
-    0x6806, //  6: out    pins, 6         side 1  ; Output 6 data bits, clock low
-    0x6806, //  7: out    pins, 6         side 1  ; Output 6 data bits, clock low
-    0x6806, //  8: out    pins, 6         side 1  ; Output 6 data bits, clock low
-    0x6806, //  9: out    pins, 6         side 1  ; Output 6 data bits, clock low
+static const uint16_t pio_instructions_hdmi_output[] = {
+    0x7006, 0x7006, 0x7006, 0x7006, 0x7006,
+    0x6806, 0x6806, 0x6806, 0x6806, 0x6806,
 };
-
 static const struct pio_program pio_program_hdmi_output = {
     .instructions = pio_instructions_hdmi_output,
     .length = 10,
     .origin = -1,
 };
 
-/**
- * Generate TMDS differential pair data for RGB channels
- * @param red_data 10-bit TMDS encoded red channel data
- * @param green_data 10-bit TMDS encoded green channel data
- * @param blue_data 10-bit TMDS encoded blue channel data
- * @return 64-bit serialized differential pair data
- */
-static uint64_t generate_hdmi_differential_data(const uint16_t red_data,
-                                                const uint16_t green_data,
-                                                const uint16_t blue_data) {
-    uint64_t serialized_output = 0;
+static inline uint8_t hdmi_color_code(uint8_t index) {
+    return index < HDMI_CTRL_BASE_INDEX ? index :
+            (uint8_t)(HDMI_DEMO_REMAP_BASE_INDEX + index - HDMI_CTRL_BASE_INDEX);
+}
 
-    // Process each of the 10 bits in the TMDS data
-    for (int bit_index = 0; bit_index < 10; bit_index++) {
-        serialized_output <<= 6;
-        if (bit_index == 5) serialized_output <<= 2; // Extra shift for timing
+static void hdmi_initialize_palette(void) {
+    if (palette_initialized) return;
+    for (unsigned i = 0; i < HDMI_CTRL_BASE_INDEX; ++i)
+        hdmi_encode_graphics_rgb(workspace.graphics.palette[i], 0);
+    palette_initialized = true;
+}
 
-        // Extract current bit from each channel
-        uint8_t red_bit = (red_data >> (9 - bit_index)) & 1;
-        uint8_t green_bit = (green_data >> (9 - bit_index)) & 1;
-        uint8_t blue_bit = (blue_data >> (9 - bit_index)) & 1;
-
-        // Create differential pairs (bit and its inverse)
-        red_bit |= (red_bit ^ 1) << 1;
-        green_bit |= (green_bit ^ 1) << 1;
-        blue_bit |= (blue_bit ^ 1) << 1;
-
-#if HDMI_PIN_invert_diffpairs
-        // Apply differential pair inversion if configured
-        red_bit ^= 0b11;
-        green_bit ^= 0b11;
-        blue_bit ^= 0b11;
-#endif
-
-        // Pack into a 6-bit output word
-#if HDMI_PIN_RGB_notBGR
-        serialized_output |= (red_bit << 4) | (green_bit << 2) | (blue_bit << 0);
-#else
-        serialized_output |= (blue_bit << 4) | (green_bit << 2) | (red_bit << 0);
-#endif
+static void hdmi_write_controls(void) {
+    static const uint16_t symbols[4] = {0x354, 0x0ab, 0x154, 0x2ab};
+    for (unsigned i = 0; i < 4; ++i) {
+        // Negative H/V polarity: blank uses CTL=3; H pulse uses CTL=2.
+        const uint64_t packed = hdmi_pack_symbols(symbols[0], symbols[0], symbols[3 - i]);
+        if (text_mode) {
+            hdmi_store_pixel(workspace.text.palette[HDMI_CTRL_BASE_INDEX + i], packed);
+        } else {
+            uint32_t *entry = workspace.graphics.palette[HDMI_CTRL_BASE_INDEX + i];
+            hdmi_store_pixel(entry, packed);
+            hdmi_store_pixel(entry + 2, packed);
+        }
     }
-    return serialized_output;
 }
 
-/**
- * TMDS 8b/10b encoder for a single color channel
- * Implements the TMDS encoding algorithm to convert 8-bit color to 10-bit TMDS
- * @param input_byte 8-bit input color value
- * @return 10-bit TMDS encoded value
- */
-static uint tmds_encode_8b10b(const uint8_t input_byte) {
-    // Count number of 1s in input byte using builtin
-    const int ones_count = __builtin_popcount(input_byte);
-
-    // Determine encoding method: XOR or XNOR
-    const bool use_xnor = ones_count > 4 || ones_count == 4 && (input_byte & 1) == 0;
-
-    // Generate 8-bit encoded data
-    uint16_t encoded_data = input_byte & 1; // Start with LSB
-    uint16_t previous_bit = encoded_data;
-
-    for (int i = 1; i < 8; i++) {
-        const uint16_t current_bit = (input_byte >> i) & 1;
-        const uint16_t encoded_bit = use_xnor ? !(previous_bit ^ current_bit) : (previous_bit ^ current_bit);
-        encoded_data |= encoded_bit << i;
-        previous_bit = encoded_bit;
+static void hdmi_change_workspace_mode(bool want_text) {
+    hdmi_initialize_palette();
+    if (want_text && !text_mode) {
+        hdmi_cache_graphics_palette(&workspace);
+        for (unsigned color = 0; color < 16; ++color) {
+            for (unsigned phase = 0; phase < 2; ++phase)
+                hdmi_store_pixel(workspace.text.palette[color + phase * 16],
+                                  hdmi_text_pixel(GRAPHICS_CGA_RGB(color), phase));
+        }
+    } else if (!want_text && text_mode) {
+        hdmi_restore_graphics_palette(&workspace);
     }
-
-    // Add control bits (bits 8 and 9)
-    encoded_data |= use_xnor ? 1 << 9 : 1 << 8;
-
-    return encoded_data;
+    text_mode = want_text;
+    hdmi_write_controls();
 }
 
-/**
- * Set PIO state machine X register to 32-bit value
- * Used to set base address for palette lookup
- */
-static inline void pio_set_x_register(PIO pio, int sm, uint32_t value) {
-    pio_sm_exec(pio, sm, pio_encode_set(pio_x, 0));
-    pio_sm_exec(pio, sm, pio_encode_mov(pio_isr, pio_null));
-    pio_sm_put_blocking(pio, sm, value);
-    pio_sm_exec(pio, sm, pio_encode_pull(false, false));
-    pio_sm_exec(pio, sm, pio_encode_mov(pio_x, pio_osr));
+// Keep all scanline memory operations in the SRAM-resident caller. In
+// particular, do not let GCC turn these loops back into XIP libc calls.
+// Every caller supplies a four-byte aligned range and a multiple of four
+// bytes. may_alias permits word accesses to the uint8_t line arrays.
+typedef uint32_t hdmi_line_word_t __attribute__((may_alias));
+
+static __force_inline void hdmi_fill_line(uint8_t *destination, uint8_t value,
+                                         unsigned bytes) {
+    volatile hdmi_line_word_t *output = (volatile hdmi_line_word_t *)destination;
+    const uint32_t word = (uint32_t)value * UINT32_C(0x01010101);
+#pragma GCC unroll 1
+    for (unsigned i = 0; i < bytes / 4u; ++i) output[i] = word;
 }
 
-static inline uint8_t hdmi_color_code(const uint8_t index) {
-    if (index >= HDMI_CTRL_BASE_INDEX) {
-        return (uint8_t)(HDMI_DEMO_REMAP_BASE_INDEX +
-                         index - HDMI_CTRL_BASE_INDEX);
+static __force_inline void hdmi_copy_line(uint8_t *destination,
+                                         const uint8_t *source, unsigned bytes) {
+    volatile hdmi_line_word_t *output = (volatile hdmi_line_word_t *)destination;
+    const hdmi_line_word_t *input = (const hdmi_line_word_t *)source;
+#pragma GCC unroll 1
+    for (unsigned i = 0; i < bytes / 4u; ++i) output[i] = input[i];
+}
+
+static __force_inline void hdmi_render_text(unsigned line, uint8_t *output) {
+    struct graphics_text_line text;
+    volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
+    if (!graphics_text_line(line, HDMI_ACTIVE_SCANLINES, &text)) {
+#pragma GCC unroll 1
+        for (unsigned i = 0; i < 160; ++i) *words++ = UINT32_C(0x10001000);
+        return;
     }
-    return index;
+    const bool wide = text.columns == 40;
+    const bool msb_first = text.msb_first;
+    // Keep the shared glyph API unchanged: this private snapshot asks for
+    // raw font bit order, which the packed emitters handle directly.
+    text.msb_first = false;
+    for (unsigned column = 0; column < text.columns; ++column) {
+        const uint16_t cell = graphics_text_cell(&text, column);
+        const uint8_t character = (uint8_t)cell;
+        const uint8_t attribute = (uint8_t)(cell >> 8);
+        const uint8_t fg = attribute & 15u;
+        const uint8_t bg = (attribute >> 4) & (text.blink_enabled ? 7u : 15u);
+        uint8_t glyph = graphics_text_glyph(&text, column, character, attribute);
+        const uint32_t background = (uint32_t)bg * UINT32_C(0x01010101);
+        const uint32_t difference = fg ^ bg;
+        if (wide) {
+            if (msb_first) {
+#pragma GCC unroll 1
+                for (unsigned pair = 0; pair < 4; ++pair) {
+                    *words++ = hdmi_text_two_doubled_pixels_reversed(glyph, background, difference);
+                    glyph <<= 2;
+                }
+            } else {
+#pragma GCC unroll 1
+                for (unsigned pair = 0; pair < 4; ++pair) {
+                    *words++ = hdmi_text_two_doubled_pixels(glyph, background, difference);
+                    glyph >>= 2;
+                }
+            }
+        } else if (msb_first) {
+            *words++ = hdmi_text_four_pixels_reversed(glyph >> 4, background, difference);
+            *words++ = hdmi_text_four_pixels_reversed(glyph, background, difference);
+        } else {
+            *words++ = hdmi_text_four_pixels(glyph, background, difference);
+            *words++ = hdmi_text_four_pixels(glyph >> 4, background, difference);
+        }
+    }
 }
 
-// The line now going out. Read from the other core, so it is volatile.
-static volatile uint16_t hdmi_current_scanline;
+static void __time_critical_func(hdmi_prepare_line)(unsigned line, unsigned buffer) {
+    const bool vsync = line >= HDMI_VSYNC_FIRST_LINE &&
+                       line < HDMI_VSYNC_FIRST_LINE + HDMI_VSYNC_LINES;
+    const unsigned hsync = text_mode ? HDMI_TEXT_HSYNC_BYTES : HDMI_GRAPHICS_HSYNC_BYTES;
+    const unsigned total = text_mode ? sizeof(workspace.text.lines[0]) :
+                                       sizeof(workspace.graphics.lines[0]);
+    uint8_t *dest = text_mode ? workspace.text.lines[buffer] : workspace.graphics.lines[buffer];
+    if (!text_mode && line < HDMI_ACTIVE_SCANLINES && (line & 1u)) {
+        // Repeat the exact already-built source row. Besides avoiding a
+        // second remap pass, this keeps a graphics pixel doubled vertically
+        // even when the emulator changes VRAM between the two scanlines.
+        hdmi_copy_line(dest, workspace.graphics.lines[buffer ^ 1u], 400);
+        return;
+    }
+    const uint8_t blank = HDMI_CTRL_BASE_INDEX + (vsync ? 2 : 0);
+    hdmi_fill_line(dest, blank + 1u, hsync);
+    if (line >= HDMI_ACTIVE_SCANLINES) {
+        hdmi_fill_line(dest + hsync, blank, total - hsync);
+        return;
+    }
+    // The renderer writes every active pixel. Fill just the porches instead
+    // of writing the entire line twice (160 instead of 800 bytes in text).
+    const unsigned active_offset = text_mode ? HDMI_TEXT_ACTIVE_OFFSET :
+                                              HDMI_GRAPHICS_ACTIVE_OFFSET;
+    const unsigned active_bytes = text_mode ? HDMI_FRAME_WIDTH * 2u : HDMI_FRAME_WIDTH;
+    hdmi_fill_line(dest + hsync, blank, active_offset - hsync);
+    hdmi_fill_line(dest + active_offset + active_bytes, blank,
+                   total - active_offset - active_bytes);
+    if (text_mode) {
+        hdmi_render_text(line, dest + HDMI_TEXT_ACTIVE_OFFSET);
+    } else {
+        uint8_t *output = dest + HDMI_GRAPHICS_ACTIVE_OFFSET;
+        if (graphics_framebuffer == NULL) {
+            hdmi_fill_line(output, 0, HDMI_FRAME_WIDTH);
+            return;
+        }
+        const uint8_t *source = graphics_framebuffer + (line >> 1u) * HDMI_FRAME_WIDTH;
+        for (unsigned x = 0; x < HDMI_FRAME_WIDTH; ++x)
+            output[x] = hdmi_color_code(source[x]);
+    }
+}
 
 static void __time_critical_func(hdmi_scanline_interrupt_handler)(void) {
-    static uint8_t buffer_index;
-    uint16_t current_scanline = hdmi_current_scanline;
-
-    dma_hw->ints0 = 1u << dma_channel_control;
-    dma_channel_set_read_addr(
-            dma_channel_control,
-            &dma_buffer_addresses[buffer_index],
-            false);
-
-    current_scanline++;
-    if (current_scanline == HDMI_TOTAL_SCANLINES) {
-        current_scanline = 0;
+    // NVIC pending state is per-core. A reconfiguration requested by the
+    // other core must not turn a stale pending IRQ into a fictitious line.
+    const uint32_t irq_state = hdmi_enter();
+    if (!(dma_hw->ints0 & (1u << dma_channel_control))) {
+        hdmi_leave(irq_state);
+        return;
     }
-    hdmi_current_scanline = current_scanline;
-
-    if (current_scanline == 0) {
-        const uint8_t *next_framebuffer = pending_framebuffer;
-        if (next_framebuffer != NULL) {
+    dma_hw->ints0 = 1u << dma_channel_control;
+    unsigned line = hdmi_current_scanline + 1u;
+    if (line == HDMI_TOTAL_SCANLINES) line = 0;
+    hdmi_current_scanline = (uint16_t)line;
+    unsigned next_line = line + 1u;
+    if (next_line == HDMI_TOTAL_SCANLINES) next_line = 0;
+    if (next_line == 0) {
+        graphics_text_frame_tick();
+        if (pending_framebuffer != NULL) {
             __mem_fence_acquire();
-            graphics_framebuffer = next_framebuffer;
+            graphics_framebuffer = pending_framebuffer;
             __mem_fence_release();
             pending_framebuffer = NULL;
         }
     }
-
-    if ((current_scanline & 1u) == 0u) {
-        return;
-    }
-
-    buffer_index ^= 1u;
-    uint8_t *line_buffer = (uint8_t *)scanline_buffers[buffer_index];
-
-    if (graphics_framebuffer != NULL &&
-        current_scanline < HDMI_ACTIVE_SCANLINES) {
-        const size_t source_line = current_scanline >> 1u;
-        const uint8_t *source =
-                graphics_framebuffer + source_line * HDMI_FRAME_WIDTH;
-        uint8_t *output = line_buffer + 72;
-
-        for (size_t x = 0; x < HDMI_FRAME_WIDTH; ++x) {
-            *output++ = hdmi_color_code(*source++);
-        }
-
-        memset(line_buffer, HDMI_CTRL_BASE_INDEX + 1, 48);
-        memset(line_buffer + 48, HDMI_CTRL_BASE_INDEX, 24);
-        memset(line_buffer + 392, HDMI_CTRL_BASE_INDEX, 8);
-        return;
-    }
-
-    if (current_scanline >= HDMI_VSYNC_FIRST_LINE &&
-        current_scanline < HDMI_VSYNC_FIRST_LINE + HDMI_VSYNC_LINES) {
-        memset(line_buffer, HDMI_CTRL_BASE_INDEX + 3, 48);
-        memset(line_buffer + 48, HDMI_CTRL_BASE_INDEX + 2, 352);
-        return;
-    }
-
-    memset(line_buffer, HDMI_CTRL_BASE_INDEX + 1, 48);
-    memset(line_buffer + 48, HDMI_CTRL_BASE_INDEX, 352);
+    // Control DMA has already advanced its ring pointer to the free buffer.
+    const unsigned next_buffer = dma_hw->ch[dma_channel_control].read_addr ==
+            (uintptr_t)&dma_buffer_addresses[0] ? 0u : 1u;
+    hdmi_prepare_line(next_line, next_buffer);
+    hdmi_leave(irq_state);
 }
 
-static inline void remove_dma_interrupt_handler() {
-    irq_set_enabled(VIDEO_DMA_IRQ, false);
-    irq_remove_handler(VIDEO_DMA_IRQ, irq_get_exclusive_handler(VIDEO_DMA_IRQ));
-}
-
-static inline void install_dma_interrupt_handler() {
-    irq_set_exclusive_handler(VIDEO_DMA_IRQ, hdmi_scanline_interrupt_handler);
-    irq_set_priority(VIDEO_DMA_IRQ, 0);
-    irq_set_enabled(VIDEO_DMA_IRQ, true);
-}
-
-//деинициализация - инициализация ресурсов
-static inline bool initialize_hdmi_output() {
-    //выключение прерывания DMA
-    if (VIDEO_DMA_IRQ == DMA_IRQ_0) {
-        dma_channel_set_irq0_enabled(dma_channel_control, false);
-    } else {
-        dma_channel_set_irq1_enabled(dma_channel_control, false);
+static void hdmi_stop_output(void) {
+    // Caller holds hdmi_lock, which also drains an IRQ already executing on
+    // the scanout core. Never enable/disable another core's NVIC here.
+    dma_channel_set_irq0_enabled(dma_channel_control, false);
+    // Disable chaining first so an in-flight completion cannot restart a
+    // channel after it was aborted. IRQs are disabled throughout the overlay.
+    const unsigned channels[4] = {dma_channel_data, dma_channel_control,
+                                 dma_channel_palette_data, dma_channel_palette_control};
+    for (unsigned i = 0; i < 4; ++i) {
+        const unsigned channel = channels[i];
+        hw_write_masked(&dma_hw->ch[channel].ctrl_trig,
+                         channel << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB,
+                         DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
     }
-
-    remove_dma_interrupt_handler();
-
-
-    // Abort all DMA channels and wait for completion
-    dma_hw->abort = 1 << dma_channel_control | 1 << dma_channel_data | 1 << dma_channel_palette_data | 1 << dma_channel_palette_control;
-
+    dma_hw->abort = (1u << dma_channel_control) | (1u << dma_channel_data) |
+                    (1u << dma_channel_palette_control) | (1u << dma_channel_palette_data);
     while (dma_hw->abort) tight_loop_contents();
-
-    //выключение SM основной и конвертора
-
-    //pio_sm_restart(PIO_VIDEO, SM_video);
     pio_sm_set_enabled(PIO_VIDEO, sm_video_output, false);
-
-    //pio_sm_restart(PIO_VIDEO_ADDR, SM_conv);
     pio_sm_set_enabled(PIO_VIDEO_ADDR, sm_address_converter, false);
+    dma_channel_acknowledge_irq0(dma_channel_control);
+}
 
-
-    //удаление программ из соответствующих PIO
-    pio_remove_program(PIO_VIDEO_ADDR, &pio_program_address_converter, pio_program_offset_converter);
-    pio_remove_program(PIO_VIDEO, &pio_program_hdmi_output, pio_program_offset_video);
-
-
-    pio_program_offset_converter = pio_add_program(PIO_VIDEO_ADDR, &pio_program_address_converter);
-    pio_program_offset_video = pio_add_program(PIO_VIDEO, &pio_program_hdmi_output);
-
-    pio_set_x_register(PIO_VIDEO_ADDR, sm_address_converter,
-                       (uint32_t)tmds_palette_buffer >> 12);
-
-    // 252-255 служебные данные(синхра) напрямую вносим в массив -конвертер
-    uint64_t *tmds_buffer_64 = (uint64_t *) tmds_palette_buffer;
-    const uint16_t ctrl_symbol_0 = 0b1101010100;
-    const uint16_t ctrl_symbol_1 = 0b0010101011;
-    const uint16_t ctrl_symbol_2 = 0b0101010100;
-    const uint16_t ctrl_symbol_3 = 0b1010101011;
-
-    const int base_index = HDMI_CTRL_BASE_INDEX;
-
-    // H-sync low, V-sync low
-    tmds_buffer_64[2 * base_index + 0] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_3);
-    tmds_buffer_64[2 * base_index + 1] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_3);
-
-    // H-sync high, V-sync low
-    tmds_buffer_64[2 * (base_index + 1) + 0] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_2);
-    tmds_buffer_64[2 * (base_index + 1) + 1] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_2);
-
-    // H-sync low, V-sync high
-    tmds_buffer_64[2 * (base_index + 2) + 0] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_1);
-    tmds_buffer_64[2 * (base_index + 2) + 1] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_1);
-
-    // H-sync high, V-sync high
-    tmds_buffer_64[2 * (base_index + 3) + 0] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_0);
-    tmds_buffer_64[2 * (base_index + 3) + 1] = generate_hdmi_differential_data(ctrl_symbol_0, ctrl_symbol_0, ctrl_symbol_0);
-
-    //настройка PIO SM для конвертации
-
+static void hdmi_start_output(void) {
+    const unsigned stride_shift = text_mode ? 11 : 12;
+    PIO_VIDEO_ADDR->instr_mem[pio_program_offset_converter + 2] =
+            pio_encode_in(pio_x, text_mode ? 21 : 20);
     pio_sm_config config = pio_get_default_sm_config();
-    sm_config_set_wrap(&config, pio_program_offset_converter, pio_program_offset_converter + (pio_program_address_converter.length - 1));
+    sm_config_set_wrap(&config, pio_program_offset_converter, pio_program_offset_converter + 3);
     sm_config_set_in_shift(&config, true, false, 32);
-
     pio_sm_init(PIO_VIDEO_ADDR, sm_address_converter, pio_program_offset_converter, &config);
-    pio_sm_set_enabled(PIO_VIDEO_ADDR, sm_address_converter, true);
+    pio_sm_put_blocking(PIO_VIDEO_ADDR, sm_address_converter,
+                         (uint32_t)(uintptr_t)&workspace >> stride_shift);
+    pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter, pio_encode_pull(false, true));
+    pio_sm_exec(PIO_VIDEO_ADDR, sm_address_converter, pio_encode_mov(pio_x, pio_osr));
 
-    //настройка PIO SM для вывода данных
     config = pio_get_default_sm_config();
-    sm_config_set_wrap(&config, pio_program_offset_video, pio_program_offset_video + (pio_program_hdmi_output.length - 1));
-
-    //настройка side set
-    sm_config_set_sideset_pins(&config,HDMI_PIN_CLOCK);
-    sm_config_set_sideset(&config, 2,false,false);
-
-    for (int i = 0; i < 2; i++) {
-        pio_gpio_init(PIO_VIDEO, HDMI_PIN_CLOCK + i);
-        gpio_set_drive_strength(HDMI_PIN_CLOCK + i, GPIO_DRIVE_STRENGTH_12MA);
-        gpio_set_slew_rate(HDMI_PIN_CLOCK + i, GPIO_SLEW_RATE_FAST);
-    }
-
-    pio_sm_set_pins_with_mask(PIO_VIDEO, sm_video_output, 3u << HDMI_PIN_CLOCK, 3u << HDMI_PIN_CLOCK);
-    pio_sm_set_pindirs_with_mask(PIO_VIDEO, sm_video_output, 3u << HDMI_PIN_CLOCK, 3u << HDMI_PIN_CLOCK);
-    //пины
-
-    for (int i = 0; i < 6; i++) {
-        pio_gpio_init(PIO_VIDEO, HDMI_PIN_DATA + i);
-        gpio_set_drive_strength(HDMI_PIN_DATA + i, GPIO_DRIVE_STRENGTH_12MA);
-        gpio_set_slew_rate(HDMI_PIN_DATA + i, GPIO_SLEW_RATE_FAST);
-    }
-    pio_sm_set_consecutive_pindirs(PIO_VIDEO, sm_video_output, HDMI_PIN_DATA, 6, true);
-    //конфигурация пинов на выход
+    sm_config_set_wrap(&config, pio_program_offset_video, pio_program_offset_video + 9);
+    sm_config_set_sideset_pins(&config, HDMI_PIN_CLOCK);
+    sm_config_set_sideset(&config, 2, false, false);
     sm_config_set_out_pins(&config, HDMI_PIN_DATA, 6);
-
-    //
     sm_config_set_out_shift(&config, true, true, 30);
     sm_config_set_fifo_join(&config, PIO_FIFO_JOIN_TX);
-
     sm_config_set_clkdiv(&config, clock_get_hz(clk_sys) / 252000000.0f);
     pio_sm_init(PIO_VIDEO, sm_video_output, pio_program_offset_video, &config);
-    pio_sm_set_enabled(PIO_VIDEO, sm_video_output, true);
 
-    //настройки DMA
-    scanline_buffers[0] = &tmds_palette_buffer[1024];
-    scanline_buffers[1] = &tmds_palette_buffer[1124];
-
-    for (size_t i = 0; i < 2; ++i) {
-        uint8_t *line_buffer = (uint8_t *)scanline_buffers[i];
-        memset(line_buffer, HDMI_CTRL_BASE_INDEX + 1, 48);
-        memset(line_buffer + 48, HDMI_CTRL_BASE_INDEX, 352);
+    // Begin with a complete vertical blank interval. Both buffers are valid
+    // before the first DMA trigger; the first IRQ describes line 480.
+    hdmi_current_scanline = HDMI_ACTIVE_SCANLINES - 1;
+    for (unsigned i = 0; i < 2; ++i) {
+        uint8_t *line = text_mode ? workspace.text.lines[i] : workspace.graphics.lines[i];
+        dma_buffer_addresses[i] = (uint32_t)(uintptr_t)line;
+        hdmi_prepare_line(HDMI_ACTIVE_SCANLINES + i, i);
     }
 
-    //основной рабочий канал
     dma_channel_config dma_config = dma_channel_get_default_config(dma_channel_data);
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_8);
-    channel_config_set_chain_to(&dma_config, dma_channel_control); // chain to other channel
-
     channel_config_set_read_increment(&dma_config, true);
     channel_config_set_write_increment(&dma_config, false);
+    channel_config_set_chain_to(&dma_config, dma_channel_control);
+    channel_config_set_dreq(&dma_config, pio_get_dreq(PIO_VIDEO_ADDR, sm_address_converter, true));
+    channel_config_set_high_priority(&dma_config, true);
+    dma_channel_configure(dma_channel_data, &dma_config,
+                          &PIO_VIDEO_ADDR->txf[sm_address_converter],
+                          (const void *)(uintptr_t)dma_buffer_addresses[0],
+                          text_mode ? 800 : 400, false);
 
-    uint dreq = (PIO_VIDEO_ADDR == pio0) ? DREQ_PIO0_TX0 + sm_address_converter : DREQ_PIO1_TX0 + sm_address_converter;
-
-    channel_config_set_dreq(&dma_config, dreq);
-
-    dma_channel_configure(
-        dma_channel_data,
-        &dma_config,
-        &PIO_VIDEO_ADDR->txf[sm_address_converter], // Write address
-        &scanline_buffers[0][0], // read address
-        400, //
-        false // Don't start yet
-    );
-
-    //контрольный канал для основного
     dma_config = dma_channel_get_default_config(dma_channel_control);
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32);
-    channel_config_set_chain_to(&dma_config, dma_channel_data); // chain to other channel
-
-    channel_config_set_read_increment(&dma_config, false);
+    channel_config_set_read_increment(&dma_config, true);
     channel_config_set_write_increment(&dma_config, false);
-
-    dma_buffer_addresses[0] = &scanline_buffers[0][0];
-    dma_buffer_addresses[1] = &scanline_buffers[1][0];
-
-    dma_channel_configure(
-        dma_channel_control,
-        &dma_config,
-        &dma_hw->ch[dma_channel_data].read_addr, // Write address
-        &dma_buffer_addresses[0], // read address
-        1, //
-        false // Don't start yet
-    );
-
-    //канал - конвертер палитры
+    channel_config_set_ring(&dma_config, false, 3);
+    channel_config_set_chain_to(&dma_config, dma_channel_data);
+    channel_config_set_high_priority(&dma_config, true);
+    dma_channel_configure(dma_channel_control, &dma_config,
+                          &dma_hw->ch[dma_channel_data].read_addr,
+                          dma_buffer_addresses, 1, false);
 
     dma_config = dma_channel_get_default_config(dma_channel_palette_data);
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32);
-    channel_config_set_chain_to(&dma_config, dma_channel_palette_control); // chain to other channel
-
     channel_config_set_read_increment(&dma_config, true);
     channel_config_set_write_increment(&dma_config, false);
-
-    dreq = DREQ_PIO1_TX0 + sm_video_output;
-    if (PIO_VIDEO == pio0) dreq = DREQ_PIO0_TX0 + sm_video_output;
-
-    channel_config_set_dreq(&dma_config, dreq);
-
-    dma_channel_configure(
-        dma_channel_palette_data,
-        &dma_config,
-        &PIO_VIDEO->txf[sm_video_output], // Write address
-        &tmds_palette_buffer[0], // read address
-        4, //
-        false // Don't start yet
-    );
-
-    //канал управления конвертером палитры
+    channel_config_set_chain_to(&dma_config, dma_channel_palette_control);
+    channel_config_set_dreq(&dma_config, pio_get_dreq(PIO_VIDEO, sm_video_output, true));
+    channel_config_set_high_priority(&dma_config, true);
+    dma_channel_configure(dma_channel_palette_data, &dma_config,
+                          &PIO_VIDEO->txf[sm_video_output], &workspace,
+                          text_mode ? 2 : 4, false);
 
     dma_config = dma_channel_get_default_config(dma_channel_palette_control);
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32);
-    channel_config_set_chain_to(&dma_config, dma_channel_palette_data); // chain to other channel
-
     channel_config_set_read_increment(&dma_config, false);
     channel_config_set_write_increment(&dma_config, false);
+    channel_config_set_chain_to(&dma_config, dma_channel_palette_data);
+    channel_config_set_dreq(&dma_config, pio_get_dreq(PIO_VIDEO_ADDR, sm_address_converter, false));
+    channel_config_set_high_priority(&dma_config, true);
+    dma_channel_configure(dma_channel_palette_control, &dma_config,
+                          &dma_hw->ch[dma_channel_palette_data].read_addr,
+                          &PIO_VIDEO_ADDR->rxf[sm_address_converter], 1, false);
 
-    dreq = DREQ_PIO1_RX0 + sm_address_converter;
-    if (PIO_VIDEO_ADDR == pio0) dreq = DREQ_PIO0_RX0 + sm_address_converter;
-
-    channel_config_set_dreq(&dma_config, dreq);
-
-    dma_channel_configure(
-        dma_channel_palette_control,
-        &dma_config,
-        &dma_hw->ch[dma_channel_palette_data].read_addr, // Write address
-        &PIO_VIDEO_ADDR->rxf[sm_address_converter], // read address
-        1, //
-        true // start yet
-    );
-
-    //стартуем прерывание и канал
-    if (VIDEO_DMA_IRQ == DMA_IRQ_0) {
-        dma_channel_acknowledge_irq0(dma_channel_control);
-        dma_channel_set_irq0_enabled(dma_channel_control, true);
-    } else {
-        dma_channel_acknowledge_irq1(dma_channel_control);
-        dma_channel_set_irq1_enabled(dma_channel_control, true);
-    }
-
-    install_dma_interrupt_handler();
-
-    dma_start_channel_mask((1u << dma_channel_control));
-
-    return true;
+    dma_channel_acknowledge_irq0(dma_channel_control);
+    dma_channel_set_irq0_enabled(dma_channel_control, true);
+    pio_sm_set_enabled(PIO_VIDEO_ADDR, sm_address_converter, true);
+    dma_start_channel_mask((1u << dma_channel_palette_control) | (1u << dma_channel_control));
+    // Pre-fill the serializer FIFO before enabling its continuously clocked SM.
+    while (!pio_sm_is_tx_fifo_full(PIO_VIDEO, sm_video_output)) tight_loop_contents();
+    pio_sm_set_enabled(PIO_VIDEO, sm_video_output, true);
 }
 
-void graphics_set_mode(const enum graphics_mode_t mode) {
-    (void)mode;
+void graphics_set_mode(enum graphics_mode_t mode) {
+    if (initialized) {
+        // Geometry changes also happen outside the active image. A class
+        // change then restarts the serial pipeline (a sink may briefly relock).
+        while (hdmi_current_scanline < HDMI_ACTIVE_SCANLINES) tight_loop_contents();
+    }
+    graphics_source_set_mode(mode);
+    const bool want_text = graphics_source_is_text();
+    const uint32_t irq_state = hdmi_enter();
+    if (initialized && want_text != text_mode) {
+        hdmi_stop_output();
+        hdmi_change_workspace_mode(want_text);
+        hdmi_start_output();
+    }
+    hdmi_leave(irq_state);
 }
 
 void graphics_wait_vblank(void) {
-    // Return the moment the line counter runs backwards, which is the start of
-    // a frame. Called from anywhere in a frame this waits at most one frame,
-    // and it hands the caller the longest possible lead over the beam.
+    if (!initialized) return;
     uint16_t previous = hdmi_current_scanline;
     while (true) {
         const uint16_t line = hdmi_current_scanline;
-        if (line < previous) {
-            return;
-        }
+        if (line < previous) return;
         previous = line;
         tight_loop_contents();
     }
 }
 
-void graphics_set_palette(const uint8_t index, const uint32_t color888) {
-    const uint8_t color_code = hdmi_color_code(index);
-    uint64_t *tmds_color = (uint64_t *)tmds_palette_buffer + color_code * 2;
-    const uint8_t red = (uint8_t)(color888 >> 16);
-    const uint8_t green = (uint8_t)(color888 >> 8);
-    const uint8_t blue = (uint8_t)color888;
-    tmds_color[0] = generate_hdmi_differential_data(
-            tmds_encode_8b10b(red),
-            tmds_encode_8b10b(green),
-            tmds_encode_8b10b(blue));
-    tmds_color[1] = tmds_color[0] ^ 0x0003ffffffffffffl;
+void graphics_set_palette(uint8_t index, uint32_t color888) {
+    const uint8_t code = hdmi_color_code(index);
+    uint32_t encoded[4];
+    // Encoding does not hold the IRQ lock. Only the short final publication
+    // is serialized against scanout and in-place workspace repacking.
+    hdmi_encode_graphics_rgb(encoded, color888);
+    const uint32_t irq_state = hdmi_enter();
+    hdmi_initialize_palette();
+    if (text_mode) {
+        uint8_t *cached = workspace.text.graphics_rgb[code];
+        cached[0] = (uint8_t)(color888 >> 16);
+        cached[1] = (uint8_t)(color888 >> 8);
+        cached[2] = (uint8_t)color888;
+    } else {
+        memcpy(workspace.graphics.palette[code], encoded, sizeof(encoded));
+    }
+    hdmi_leave(irq_state);
 }
 
-void graphics_set_buffer(uint8_t *buffer,
-                         const uint16_t width,
-                         const uint16_t height) {
-    if (width == HDMI_FRAME_WIDTH && height == HDMI_FRAME_HEIGHT) {
+void graphics_set_buffer(uint8_t *buffer, uint16_t width, uint16_t height) {
+    const uint32_t irq_state = hdmi_enter();
+    if (width == HDMI_FRAME_WIDTH && height == HDMI_FRAME_HEIGHT)
         graphics_framebuffer = buffer;
-    }
+    hdmi_leave(irq_state);
 }
 
 void hdmi_graphics_init(void) {
-    graphics_framebuffer = hdmi_primary_framebuffer;
+    if (initialized) return;
+    hdmi_lock = spin_lock_init(spin_lock_claim_unused(true));
+#ifndef GRAPHICS_NO_BUILTIN_FRAMEBUFFER
+    if (graphics_framebuffer == NULL) graphics_framebuffer = hdmi_primary_framebuffer;
+#endif
     pending_framebuffer = NULL;
-
+    hdmi_change_workspace_mode(graphics_source_is_text());
     sm_video_output = pio_claim_unused_sm(PIO_VIDEO, true);
     sm_address_converter = pio_claim_unused_sm(PIO_VIDEO_ADDR, true);
     dma_channel_control = dma_claim_unused_channel(true);
     dma_channel_data = dma_claim_unused_channel(true);
     dma_channel_palette_control = dma_claim_unused_channel(true);
     dma_channel_palette_data = dma_claim_unused_channel(true);
+    pio_program_offset_converter = pio_add_program(PIO_VIDEO_ADDR, &pio_program_address_converter);
+    pio_program_offset_video = pio_add_program(PIO_VIDEO, &pio_program_hdmi_output);
 
-    initialize_hdmi_output();
+    for (unsigned i = 0; i < 2; ++i) {
+        pio_gpio_init(PIO_VIDEO, HDMI_PIN_CLOCK + i);
+        gpio_set_drive_strength(HDMI_PIN_CLOCK + i, GPIO_DRIVE_STRENGTH_12MA);
+        gpio_set_slew_rate(HDMI_PIN_CLOCK + i, GPIO_SLEW_RATE_FAST);
+    }
+    for (unsigned i = 0; i < 6; ++i) {
+        pio_gpio_init(PIO_VIDEO, HDMI_PIN_DATA + i);
+        gpio_set_drive_strength(HDMI_PIN_DATA + i, GPIO_DRIVE_STRENGTH_12MA);
+        gpio_set_slew_rate(HDMI_PIN_DATA + i, GPIO_SLEW_RATE_FAST);
+    }
+    pio_sm_set_pins_with_mask(PIO_VIDEO, sm_video_output,
+                             3u << HDMI_PIN_CLOCK, 3u << HDMI_PIN_CLOCK);
+    pio_sm_set_consecutive_pindirs(PIO_VIDEO, sm_video_output, HDMI_PIN_CLOCK, 2, true);
+    pio_sm_set_consecutive_pindirs(PIO_VIDEO, sm_video_output, HDMI_PIN_DATA, 6, true);
+    irq_set_exclusive_handler(VIDEO_DMA_IRQ, hdmi_scanline_interrupt_handler);
+    irq_set_priority(VIDEO_DMA_IRQ, 0);
+    irq_clear(VIDEO_DMA_IRQ);
+    irq_set_enabled(VIDEO_DMA_IRQ, true);
+    initialized = true;
+    hdmi_start_output();
 }
 
 uint8_t *graphics_get_framebuffer(void) {
-    return hdmi_primary_framebuffer;
+#ifndef GRAPHICS_NO_BUILTIN_FRAMEBUFFER
+    if (graphics_framebuffer == NULL) return hdmi_primary_framebuffer;
+#endif
+    return (uint8_t *)graphics_framebuffer;
 }
 
 void graphics_present_framebuffer(const uint8_t *framebuffer) {
+    if (!initialized) {
+        graphics_framebuffer = framebuffer;
+        return;
+    }
     __mem_fence_release();
     pending_framebuffer = framebuffer;
-    while (pending_framebuffer != NULL) {
-        tight_loop_contents();
-    }
+    while (pending_framebuffer != NULL) tight_loop_contents();
     __mem_fence_acquire();
 }
 
-void graphics_set_bgcolor(const uint32_t color888) {
+void graphics_set_bgcolor(uint32_t color888) {
     (void)color888;
 }
 
-void graphics_set_flashmode(const bool flash_line, const bool flash_frame) {
-    (void)flash_line;
-    (void)flash_frame;
-}
-
-void graphics_set_offset(const int x, const int y) {
+void graphics_set_offset(int x, int y) {
     (void)x;
     (void)y;
-}
-
-void graphics_set_textbuffer(uint8_t *buffer) {
-    text_buffer = buffer;
-}
-
-void clrScr(const uint8_t color) {
-    if (text_buffer == NULL) {
-        return;
-    }
-
-    uint16_t *output = (uint16_t *)text_buffer;
-    int size = TEXTMODE_COLS * TEXTMODE_ROWS;
-    while (size--) {
-        *output++ = (uint16_t)(color << 4 | ' ');
-    }
 }

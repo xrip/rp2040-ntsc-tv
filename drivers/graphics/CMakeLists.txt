@@ -5,6 +5,10 @@ target_sources(graphics INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/graphics_modes.c
 )
 
+if (HDMI)
+    target_sources(graphics INTERFACE ${CMAKE_CURRENT_LIST_DIR}/graphics_text.c)
+endif()
+
 target_link_libraries(graphics INTERFACE
         hardware_clocks
         hardware_vreg

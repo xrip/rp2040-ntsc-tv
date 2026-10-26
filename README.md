@@ -37,9 +37,12 @@ over the whole 80 x 30 screen, and gets sixteen steps of heat out of six CGA
 colors by drawing the CP437 shade characters over a darker background. It is
 also the one part of the demo that exercises a text mode.
 
-The HDMI and TFT builds run the graphics part alone. Those two outputs scan the
-framebuffer straight out and ignore `graphics_set_mode()`, so a text part would
-only freeze the picture. The whole text part is compiled out of them.
+The default HDMI and TFT demos run the graphics part alone. HDMI additionally
+supports native 640 x 480 text from application-owned VRAM and a supplied font.
+The separate `rp2040-hdmi-text` / `rp2350-hdmi-text` demo shows all 16 foreground
+and background colors, and cycles through 80 x 30, 80 x 25, and 40 x 25.
+See [HDMI text and emulator integration](docs/HDMI_TEXT.md). TFT continues to
+scan the graphics framebuffer directly.
 
 ## Dual VGA and NTSC system map
 
@@ -262,14 +265,24 @@ drivers. The VGA-only adapter compiles to an empty unit in that form.
 
 ### `drivers/hdmi`
 
-This is the fixed 320 x 240 indexed HDMI module. It uses one PIO state machine
+This module sends 640 x 480 timing with either doubled 320 x 240 indexed graphics
+or native-resolution text. It uses one PIO state machine
 for TMDS output, one PIO state machine for palette-address conversion, four DMA
-channels, and an exclusive DMA IRQ. The default HDMI base pin is GPIO6. HDMI
+channels, and an exclusive DMA IRQ. The default HDMI base pin is GPIO12. HDMI
 uses a 378 MHz system clock and is not combined with VGA or NTSC.
 
 Four TMDS control symbols use palette slots 252 through 255. Logical colors in
 those four slots are remapped to slots 48 through 51, so the HDMI form has 252
 independent palette colors.
+
+Text modes read the emulator's existing character/attribute page and 256-glyph
+font directly. No text or font copy and no 640 x 480 framebuffer is allocated.
+The existing 4,896-byte HDMI palette/scanline workspace is reused for both
+transports; additional scanline code and small descriptors still consume RAM.
+Text uses a fixed 16-color CGA palette. Graphics/text class changes restart the
+DMA/PIO pipeline during vertical blanking; the monitor may briefly relock.
+The integration API, memory accounting, and validation limits are documented in
+[docs/HDMI_TEXT.md](docs/HDMI_TEXT.md).
 
 ### `drivers/st7789`
 
@@ -689,8 +702,9 @@ The scanout is not format-neutral.
 - The VGA signal is fixed at 640 x 480 timing.
 - The NTSC signal and active window are fixed.
 - Only the modes listed above crop, scale, or centre; the rest are direct.
-- The composer is used by VGA and NTSC only. HDMI and TFT still take the direct
-  320 x 240 buffer and ignore `graphics_set_mode()`.
+- The composer described here is used by VGA and NTSC only. HDMI has its own
+  native text renderer and otherwise takes the direct 320 x 240 graphics buffer.
+  TFT takes the direct graphics buffer and ignores `graphics_set_mode()`.
 
 Changing the 320 x 240 line and frame size itself is not enough. The row address
 math, scanline loops, palette form, active area, DMA count, and line buffer
@@ -729,6 +743,7 @@ select the output modules; the rest tune them:
 | `VGA` | `ON` | link `vga` and set `VGA=1` |
 | `NTSC_TV` | `ON` | link `ntsc-composite` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
+| `HDMI_TEXT_DEMO` | `OFF` | HDMI text palette demo; omit the graphics framebuffer |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
 | `NTSC_PIN_OUTPUT` | `28` | composite output GPIO |
 | `NTSC_LOW_RAM` | `OFF` | use the 512-byte compact NTSC palette |
@@ -809,7 +824,7 @@ the same public `graphics_*` names. NTSC-only use needs only the new
 
 ### CLion and command-line presets
 
-Six configure presets are present. The default two build dual VGA and NTSC:
+The default two configure presets build dual VGA and NTSC:
 
 ```powershell
 cmake --preset rp2040
@@ -821,7 +836,7 @@ cmake --preset rp2350
 cmake --build cmake-build-rp2350 --target ntsc-tv
 ```
 
-The presets select:
+The output presets include:
 
 | Preset | Board | Platform | CPU |
 |---|---|---|---|
@@ -829,13 +844,17 @@ The presets select:
 | `rp2350` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 | `rp2040-hdmi` | `pico` | `rp2040` | Cortex-M0+ |
 | `rp2350-hdmi` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
+| `rp2040-hdmi-text` | `pico` | `rp2040` | Cortex-M0+ |
+| `rp2350-hdmi-text` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 | `rp2040-tft` | `pico` | `rp2040` | Cortex-M0+ |
 | `rp2350-tft` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
 
-All six use `MinSizeRel`, Ninja, UF2 output, normal NTSC palette RAM, and no
+These presets use `MinSizeRel`, Ninja, UF2 output, normal NTSC palette RAM, and no
 scratch placement. `rp2040` and `rp2350` select VGA plus NTSC; the `-hdmi` and
 `-tft` presets turn both of those off and select their own single output. The
-two RP2350 presets also set `PICO_NO_COPRO_DIS=ON`.
+RP2350 presets also set `PICO_NO_COPRO_DIS=ON`. The `-hdmi-text` presets build the
+text palette demo with `GRAPHICS_BUILTIN_FRAMEBUFFER=OFF` and use a portable
+picotool fetch directory under `cmake-build-tools/picotool`.
 
 Picotool is fetched under:
 
@@ -850,8 +869,20 @@ bin/rp2040/MinSizeRel/
 bin/rp2350-arm-s/MinSizeRel/
 ```
 
-The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or
-`ntsc-tv-tft.uf2` in the matching directory.
+The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`,
+`ntsc-tv-hdmi-text.uf2`, or `ntsc-tv-tft.uf2` in the matching directory.
+
+For the HDMI text test:
+
+```sh
+cmake --preset rp2040-hdmi-text
+cmake --build cmake-build-rp2040-hdmi-text --target ntsc-tv
+# Pico 2: replace rp2040 with rp2350 in both commands.
+```
+
+The test reuses one 4,800-byte application text page and the existing `font_8x16`.
+It changes a glyph in place once per second and cycles modes every eight seconds.
+NTSC is disabled in these builds; its driver is unchanged.
 
 ## Hardware
 
@@ -878,8 +909,10 @@ electrical schematic is not part of this repository.
 
 ### HDMI
 
-The default clock differential pair starts at GPIO6 and the three data pairs
-start at GPIO8. The module uses GPIO6 through GPIO13.
+The default clock differential pair is GPIO12/13 and the three data pairs
+are GPIO14/15, GPIO16/17, and GPIO18/19 (`HDMI_BASE_PIN=12`, for M2P2).
+RP2350 HDMI builds embed the flash setup with clock divider 4 and read delay 4
+before raising the system clock to 378 MHz.
 
 ### TFT
 

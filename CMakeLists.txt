@@ -20,6 +20,7 @@ option(VGA "Enable VGA output" ON)
 option(RGBS "Use 15 kHz 240p RGBs (SCART) timing on the VGA pins" OFF)
 option(NTSC_TV "Enable NTSC composite output" ON)
 option(HDMI "Enable HDMI output" OFF)
+option(HDMI_TEXT_DEMO "Build the HDMI 16-color text/attribute test" OFF)
 option(TFT "Enable TFT output" OFF)
 option(NTSC_LOW_RAM "Use compact NTSC palette tables" OFF)
 option(NTSC_USE_SCRATCH_Y "Place NTSC palette tables in scratch Y" OFF)
@@ -47,6 +48,10 @@ endif()
 
 if (HDMI AND TFT)
     message(FATAL_ERROR "Select HDMI or TFT, not both")
+endif()
+
+if (HDMI_TEXT_DEMO AND NOT HDMI)
+    message(FATAL_ERROR "HDMI_TEXT_DEMO requires HDMI=ON")
 endif()
 
 if (VGA)
@@ -77,6 +82,11 @@ add_executable(${PROJECT_NAME})
 
 pico_define_boot_stage2(slower_boot ${PICO_DEFAULT_BOOT_STAGE2_FILE})
 target_compile_definitions(slower_boot PRIVATE PICO_FLASH_SPI_CLKDIV=4)
+if (HDMI AND PICO_PLATFORM STREQUAL "rp2350-arm-s")
+    # RP2350 otherwise discards boot2 and keeps the ROM's flash timings.
+    target_compile_definitions(slower_boot PRIVATE PICO_FLASH_SPI_RXDELAY=4)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_EMBED_XIP_SETUP=1)
+endif()
 pico_set_boot_stage2(${PROJECT_NAME} slower_boot)
 
 pico_add_extra_outputs(${PROJECT_NAME})
@@ -89,7 +99,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 pico_set_double_implementation(${PROJECT_NAME} none) # size optimizations
 pico_set_printf_implementation(${PROJECT_NAME} none)
 
-target_sources(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ntsc-tv.c)
+if (HDMI_TEXT_DEMO)
+    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/hdmi-text-demo.c)
+    # The demo owns only its small text page and the existing font. It has no
+    # 320x240 graphics buffer, and the driver must not allocate an unused one.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE GRAPHICS_NO_BUILTIN_FRAMEBUFFER=1)
+else()
+    target_sources(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ntsc-tv.c)
+endif()
 
 target_link_libraries(${PROJECT_NAME}
         graphics
@@ -112,7 +129,11 @@ if (NTSC_TV)
 endif()
 if (HDMI)
     target_link_libraries(${PROJECT_NAME} hdmi)
-    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-hdmi")
+    if (HDMI_TEXT_DEMO)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-hdmi-text")
+    else()
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "ntsc-tv-hdmi")
+    endif()
 endif()
 if (TFT)
     target_link_libraries(${PROJECT_NAME} st7789)

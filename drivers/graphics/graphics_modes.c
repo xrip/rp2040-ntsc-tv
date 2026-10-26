@@ -23,6 +23,11 @@ static uint8_t graphics_blank_line[GRAPHICS_FRAME_WIDTH] __attribute__((aligned(
 // Every backend asks this for each of its lines, so like the line builders it
 // belongs in RAM and not in flash.
 static bool __time_critical_func(graphics_mode_is_text)(const enum graphics_mode_t mode) {
+#if defined(HDMI)
+    if (mode >= TEXTMODE_40x25_BW && mode <= TEXTMODE_80x25_COLOR) {
+        return true;
+    }
+#endif
     return mode == TEXTMODE_DEFAULT ||
            mode == TEXTMODE_53x30 ||
            mode == TEXTMODE_160x100;
@@ -31,10 +36,15 @@ static bool __time_critical_func(graphics_mode_is_text)(const enum graphics_mode
 void graphics_source_set_mode(const enum graphics_mode_t mode) {
     graphics_mode = mode;
 
+#if defined(HDMI)
+    // A mode change must never erase borrowed emulator VRAM.
+    graphics_text_select_mode((unsigned)mode);
+#else
     if (graphics_source_buffer != NULL) {
         memset(graphics_source_buffer, 0,
                (size_t)graphics_source_width * graphics_source_height);
     }
+#endif
 }
 
 void graphics_source_set_buffer(uint8_t *buffer,
@@ -55,7 +65,11 @@ bool __time_critical_func(graphics_source_is_text)(void) {
 }
 
 unsigned __time_critical_func(graphics_text_columns)(void) {
+#if defined(HDMI)
+    return graphics_text_columns_current();
+#else
     return graphics_mode == TEXTMODE_53x30 ? TEXTMODE_COLS / 2u : TEXTMODE_COLS;
+#endif
 }
 
 const uint8_t *__time_critical_func(graphics_text_row)(

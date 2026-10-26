@@ -41,6 +41,10 @@ extern "C" {
 #include "font8x8.h"
 #include "font8x16.h"
 
+#if defined(HDMI)
+#include "graphics_text.h"
+#endif
+
 enum graphics_mode_t {
     TEXTMODE_40x25_BW,
     TEXTMODE_40x25_COLOR,
@@ -74,12 +78,13 @@ enum graphics_mode_t {
 
     // Modes kept for the Murmulator emulator family. The scanline composer in
     // drivers/graphics/graphics_modes.c gives these their picture layout.
-    TEXTMODE_DEFAULT = 0x100,   // 80 x 30 text, font 4x6 on an 8-pixel row pitch
-    TEXTMODE_53x30 = 0x101,     // 40 x 30 text, same font at double width
+    TEXTMODE_DEFAULT = 0x100,   // 80 x 30 text (HDMI: supplied font, normally 8x16)
+    TEXTMODE_53x30 = 0x101,     // legacy name: 40 x 30 text at double width
     TEXTMODE_160x100 = 0x102,   // same layout as TEXTMODE_DEFAULT
     GRAPHICSMODE_DEFAULT = 0x103, // app buffer, 1x, centred on the 320-pixel line
     GG_160x144 = 0x104,         // Game Gear window, 1x, centred
     GG_160x144x4x3 = 0x105,     // Game Gear window, 2x wide, 2:3 line scale
+    TEXTMODE_80x30 = TEXTMODE_DEFAULT,
 };
 
 // Буффер текстового режима
@@ -110,7 +115,7 @@ uint8_t *graphics_get_framebuffer(void);
 
 void graphics_present_framebuffer(const uint8_t *framebuffer);
 
-void draw_text(const char string[TEXTMODE_COLS + 1], uint32_t x, uint32_t y, uint8_t color, uint8_t bgcolor);
+void draw_text(const char *string, uint32_t x, uint32_t y, uint8_t color, uint8_t bgcolor);
 void draw_window(const char title[TEXTMODE_COLS + 1], uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
 void clrScr(uint8_t color);
