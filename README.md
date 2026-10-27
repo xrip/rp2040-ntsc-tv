@@ -289,6 +289,9 @@ words, with the expander requiring addresses 0..11 on PIO0.
 The integration API, memory accounting, and validation limits are documented in
 [docs/HDMI_TEXT.md](docs/HDMI_TEXT.md). CPU comparisons and GPIO profiling are in
 [docs/HDMI_TEXT_PERFORMANCE.md](docs/HDMI_TEXT_PERFORMANCE.md).
+RP2350 Arm has dedicated M33 Thumb-2 text and fill loops; their linked-code
+instruction counts and RAM comparison are in
+[docs/HDMI_TEXT_RP2350.md](docs/HDMI_TEXT_RP2350.md).
 
 ### `drivers/st7789`
 

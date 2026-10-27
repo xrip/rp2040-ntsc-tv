@@ -44,10 +44,15 @@ CS_TO_UC.update({'sp': UC_ARM_REG_SP, 'lr': UC_ARM_REG_LR,
 
 class Trace:
     elf_images = {}
+    allow_unaligned = False
+
+    @staticmethod
+    def create_machine():
+        return Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
 
     def __init__(self, path, dirty_divider=False):
         self.path = path
-        self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+        self.uc = self.create_machine()
         self.uc.mem_map(0x10000000, 0x1000000)
         self.uc.mem_map(SRAM, 0x100000)
         self.uc.mem_map(SIO, 0x1000)
@@ -108,7 +113,7 @@ class Trace:
 
     def on_read(self, uc, access, address, size, value, data):
         self.read_count += 1
-        if size in (2, 4) and address % size:
+        if not self.allow_unaligned and size in (2, 4) and address % size:
             raise RuntimeError(f'Unaligned Cortex-M0+ read: {size} bytes at {address:#x}')
         if self.configured:
             if FONT - 16 <= address < FONT + 16384:
@@ -133,7 +138,7 @@ class Trace:
 
     def on_write(self, uc, access, address, size, value, data):
         self.write_count += 1
-        if size in (2, 4) and address % size:
+        if not self.allow_unaligned and size in (2, 4) and address % size:
             raise RuntimeError(f'Unaligned Cortex-M0+ write: {size} bytes at {address:#x}')
         if self.check_scanline_writes:
             workspace = self.symbols['workspace']
@@ -307,7 +312,7 @@ class Trace:
                 row, glyph_y = divmod(y, cell_height)
                 if height <= 8:
                     glyph_y //= 2
-                start = 8192 - columns if options['wrap'] else 0
+                start = options.get('display_start', 8192 - columns if options['wrap'] else 0)
                 row_start = (start + row * columns * 2) % 8192
                 cursor_offset = (start + 30) % 8192
                 frame = self.uc.mem_read(self.symbols['text_frame'], 1)[0]

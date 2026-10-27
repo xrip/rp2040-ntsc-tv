@@ -161,8 +161,38 @@ typedef uint32_t hdmi_line_word_t __attribute__((may_alias));
 static __force_inline void hdmi_fill_words(uint8_t *destination,
                                          uint32_t word, unsigned bytes) {
     volatile hdmi_line_word_t *output = (volatile hdmi_line_word_t *)destination;
+#if PICO_RP2350 && defined(__ARM_ARCH_8M_MAIN__)
+    // M33 STRD accepts a word-aligned address and the same source twice.
+    // Constant-size callers fold these prefixes: the eight-byte back porch
+    // becomes one STRD. Larger fills write four words per loop without extra
+    // registers or a scanline cache; an odd word count still works.
+    if (bytes & 4u) *output++ = word;
+    unsigned pairs = bytes >> 3u;
+    if (pairs & 1u) {
+        __asm volatile (
+            "strd %[word], %[word], [%[output]], #8\n"
+            : [output] "+&r" (output)
+            : [word] "r" (word)
+            : "memory"
+        );
+    }
+    pairs >>= 1u;
+    if (pairs == 0u) return;
+    __asm volatile (
+        ".syntax unified\n"
+        "1:\n"
+        "strd %[word], %[word], [%[output]], #8\n"
+        "strd %[word], %[word], [%[output]], #8\n"
+        "subs %[pairs], %[pairs], #1\n"
+        "bne 1b\n"
+        : [output] "+&r" (output), [pairs] "+&r" (pairs)
+        : [word] "r" (word)
+        : "cc", "memory"
+    );
+#else
 #pragma GCC unroll 1
     for (unsigned i = 0; i < bytes / 4u; ++i) output[i] = word;
+#endif
 }
 
 static __force_inline void hdmi_fill_line(uint8_t *destination, uint8_t value,
@@ -189,9 +219,9 @@ void __time_critical_func(hdmi_update_text_attributes)(unsigned state) {
     workspace.text.attribute_state = state;
 }
 
-// Keep a fixed ABI at the hot kernels. The Thumb blocks explicitly preserve
-// r8/r9 too: these registers belong to the interrupted application. Their
-// temporary stack slots exist only inside a single asm block, with no calls.
+// Keep a fixed ABI at the hot kernels. The M0+ blocks explicitly preserve
+// r8/r9 too: these registers belong to the interrupted application. The M33
+// blocks use allocator-owned operands, so GCC generates their saved registers.
 static __attribute__((noipa))
 void __time_critical_func(hdmi_text_span_80)(uint8_t *output,
         const uint8_t *cells, unsigned count, const struct graphics_text_line *text) {
@@ -199,13 +229,13 @@ void __time_critical_func(hdmi_text_span_80)(uint8_t *output,
     const unsigned stride = text->font_stride;
     const uint16_t *patterns = workspace.text.glyphs[text->msb_first];
     const uint32_t *colors = workspace.text.attributes;
-    const uint8_t *end = cells + count * 2u;
     volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
 #if PICO_RP2040 && defined(__arm__)
     // Cortex-M0+ has only eight low registers. Keep the loop bound in r8 so
     // GCC cannot spill the stride and LUT pointers on every character. This
     // Thumb-1 loop needs 21 ideal core clocks/cell, including the taken branch.
     if (count == 0) return;
+    const uint8_t *end = cells + count * 2u;
     register const uint8_t *limit __asm("r12") = end;
     uint32_t glyph, attribute;
     __asm volatile (
@@ -237,7 +267,58 @@ void __time_critical_func(hdmi_text_span_80)(uint8_t *output,
           [patterns] "l" (patterns), [colors] "l" (colors), [limit] "r" (limit)
         : "r8", "cc", "memory"
     );
+#elif PICO_RP2350 && defined(__ARM_ARCH_8M_MAIN__)
+    // Byte loads retain support for an unaligned caller-owned VRAM/font.
+    // Handle an odd span first; STRD needs only four-byte output alignment.
+    if (count & 1u) {
+        const unsigned glyph = font[(unsigned)cells[0] * stride];
+        *words++ = colors[cells[1]] | (uint32_t)patterns[glyph] << 8;
+        cells += 2;
+    }
+    count >>= 1u; // pairs, including a possible final pair
+    if (count == 0u) return;
+    uint32_t glyph0, glyph1, attribute0, attribute1;
+    // Interleave two independent cells to separate dependent SRAM loads.
+#define HDMI_M33_TEXT_PAIR \
+        "ldrb %[glyph0], [%[cells]], #4\n" \
+        "ldrb %[attribute0], [%[cells], #-3]\n" \
+        "ldrb %[glyph1], [%[cells], #-2]\n" \
+        "ldrb %[attribute1], [%[cells], #-1]\n" \
+        "mul %[glyph0], %[glyph0], %[stride]\n" \
+        "mul %[glyph1], %[glyph1], %[stride]\n" \
+        "ldr %[attribute0], [%[colors], %[attribute0], lsl #2]\n" \
+        "ldr %[attribute1], [%[colors], %[attribute1], lsl #2]\n" \
+        "ldrb %[glyph0], [%[font], %[glyph0]]\n" \
+        "ldrb %[glyph1], [%[font], %[glyph1]]\n" \
+        "ldrh %[glyph0], [%[patterns], %[glyph0], lsl #1]\n" \
+        "ldrh %[glyph1], [%[patterns], %[glyph1], lsl #1]\n" \
+        "orr %[glyph0], %[attribute0], %[glyph0], lsl #8\n" \
+        "orr %[glyph1], %[attribute1], %[glyph1], lsl #8\n" \
+        "strd %[glyph0], %[glyph1], [%[words]], #8\n"
+    __asm volatile (
+        ".syntax unified\n"
+        // Run two pairs per loop. An odd pair count enters at the second
+        // body, so no duplicated tail or read beyond the span is needed.
+        "lsrs %[glyph0], %[count], #1\n"
+        "adc %[count], %[glyph0], #0\n" // non-S: retain odd-pair carry
+        "bcs 2f\n"
+        ".p2align 2\n"
+        "1:\n"
+        HDMI_M33_TEXT_PAIR
+        "2:\n"
+        HDMI_M33_TEXT_PAIR
+        "subs %[count], %[count], #1\n"
+        "bne 1b\n"
+        : [words] "+&r" (words), [cells] "+&r" (cells), [count] "+&r" (count),
+          [glyph0] "=&r" (glyph0), [glyph1] "=&r" (glyph1),
+          [attribute0] "=&r" (attribute0), [attribute1] "=&r" (attribute1)
+        : [font] "r" (font), [stride] "r" (stride),
+          [patterns] "r" (patterns), [colors] "r" (colors)
+        : "cc", "memory"
+    );
+#undef HDMI_M33_TEXT_PAIR
 #else
+    const uint8_t *end = cells + count * 2u;
 #pragma GCC unroll 1
     while (cells != end) {
         const unsigned glyph = font[(unsigned)cells[0] * stride];
@@ -254,10 +335,10 @@ void __time_critical_func(hdmi_text_span_40)(uint8_t *output,
     const unsigned stride = text->font_stride;
     const uint16_t *patterns = workspace.text.wide_glyphs[text->msb_first];
     const uint32_t *colors = workspace.text.attributes;
-    const uint8_t *end = cells + count * 2u;
     volatile hdmi_line_word_t *words = (volatile hdmi_line_word_t *)output;
 #if PICO_RP2040 && defined(__arm__)
     if (count == 0) return;
+    const uint8_t *end = cells + count * 2u;
     register const uint8_t *limit __asm("r12") = end;
     uint32_t glyph, attribute;
     // As in the 80-column loop, no stack loads occur inside the hot loop.
@@ -318,7 +399,43 @@ void __time_critical_func(hdmi_text_span_40)(uint8_t *output,
 #undef HDMI_WIDE_LOOP
 #undef HDMI_WIDE_HIGH_NIBBLE
 #undef HDMI_WIDE_LOW_NIBBLE
+#elif PICO_RP2350 && defined(__ARM_ARCH_8M_MAIN__)
+    if (count == 0u) return;
+    uint32_t glyph, attribute, low;
+    // Fixed nibble extraction removes both per-cell variable shifts and
+    // their redundant masks. Only the store order depends on font bit order.
+#define HDMI_M33_WIDE_LOOP(first, second) \
+    __asm volatile ( \
+        ".syntax unified\n" \
+        "1:\n" \
+        "ldrb %[glyph], [%[cells]], #2\n" \
+        "ldrb %[attribute], [%[cells], #-1]\n" \
+        "mul %[glyph], %[glyph], %[stride]\n" \
+        "ldr %[attribute], [%[colors], %[attribute], lsl #2]\n" \
+        "ldrb %[glyph], [%[font], %[glyph]]\n" \
+        "and %[low], %[glyph], #15\n" \
+        "lsr %[glyph], %[glyph], #4\n" \
+        "ldrh %[low], [%[patterns], %[low], lsl #1]\n" \
+        "ldrh %[glyph], [%[patterns], %[glyph], lsl #1]\n" \
+        "orr %[low], %[attribute], %[low], lsl #8\n" \
+        "orr %[glyph], %[attribute], %[glyph], lsl #8\n" \
+        "strd " first ", " second ", [%[words]], #8\n" \
+        "subs %[count], %[count], #1\n" \
+        "bne 1b\n" \
+        : [words] "+&r" (words), [cells] "+&r" (cells), [count] "+&r" (count), \
+          [glyph] "=&r" (glyph), [attribute] "=&r" (attribute), [low] "=&r" (low) \
+        : [font] "r" (font), [stride] "r" (stride), \
+          [patterns] "r" (patterns), [colors] "r" (colors) \
+        : "cc", "memory" \
+    )
+    if (text->msb_first) {
+        HDMI_M33_WIDE_LOOP("%[glyph]", "%[low]");
+    } else {
+        HDMI_M33_WIDE_LOOP("%[low]", "%[glyph]");
+    }
+#undef HDMI_M33_WIDE_LOOP
 #else
+    const uint8_t *end = cells + count * 2u;
     const unsigned first_shift = text->msb_first ? 4u : 0u;
     const unsigned second_shift = first_shift ^ 4u;
 #pragma GCC unroll 1

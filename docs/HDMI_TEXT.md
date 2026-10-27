@@ -1,7 +1,7 @@
 # Native HDMI text with borrowed VRAM and font
 
 This performance revision targets the HDMI-only build of `vga-tv-hybrid`, at
-commit `34f401e07bb4ade91ec604512b086d9b368efad3`. It preserves the current
+commit `231f1fa7e50368ee07fb72330377a15c0208ede5`. It preserves the current
 RP2350 flash setup, GPIO12..19 assignment, and text/3D demo cycle. It does not modify the NTSC driver or
 enable simultaneous HDMI/NTSC output.
 
@@ -222,10 +222,16 @@ Blink is folded into the attribute lookup, with only its upper 128 entries
 updated when the blink state changes. A cursor patches one or two commands
 after the character loop. A row wrapping at the VRAM boundary is rendered as
 two contiguous spans. The inner loop has no cursor, blink, or wrapping branch.
-RP2040 uses short Thumb-1 loops; RP2350 uses the C versions.
+RP2040 uses short Thumb-1 loops. RP2350 Arm uses dedicated M33 Thumb-2 loops:
+four cells per loop at 80 columns, fixed nibble extraction at 40 columns, and
+paired word stores for text output and blank fills. Caller VRAM/font still use
+byte loads, including unaligned bases. Other targets retain the C fallback.
 
 See [HDMI_TEXT_PERFORMANCE.md](HDMI_TEXT_PERFORMANCE.md) for before/after CPU
 traces, RAM accounting, the XIP decision, and on-board GPIO profiling.
+The later M33-specific comparison against the PIO implementation is in
+[HDMI_TEXT_RP2350.md](HDMI_TEXT_RP2350.md); its instruction counts are not a
+cycle model or a measured CPU percentage.
 
 ### Reusing an existing graphics framebuffer too
 

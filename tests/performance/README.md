@@ -88,3 +88,49 @@ verify the retained indexed scanline output and odd-line duplication as well.
 An oscilloscope/logic-analyzer measurement of the optional profiling GPIO
 under the real emulator remains the final check of actual IRQ occupation
 and worst-line duration, including DMA and other-core contention.
+
+## RP2350 / Cortex-M33
+
+`trace_hdmi_m33.py` selects Unicorn's Cortex-M33 CPU model and executes the
+actual RP2350 ELF. It reuses the scalar pixel oracle and memory/ABI guards,
+but reports **executed instructions and memory-access counts, not cycles or
+CPU utilization**. Do not interpret its instruction-reduction ratio as an
+equal clock-cycle reduction: M33 pipelines, instruction widths, memory latency,
+branches, division and bus arbitration affect real elapsed time.
+
+```sh
+.venv/bin/python trace_hdmi_m33.py rp2350-before.elf --verify --json before-cases.json
+.venv/bin/python trace_hdmi_m33.py rp2350-after.elf --verify --json after-cases.json
+.venv/bin/python trace_hdmi_m33.py rp2350-after.elf --frame \
+  --columns 80 --rows 30 --verify --json after-frame-80x30.json
+.venv/bin/python trace_hdmi_m33.py rp2350-after.elf --kernels \
+  --verify --json after-kernels.json
+```
+
+The M33 wrapper always initializes the production command workspace before
+tracing and keeps that startup work outside the results. The current RP2350
+SDK's software byte spinlocks use separate synthetic SRAM bytes initialized
+to unlocked. Hardware division executes as M33 instructions; the RP2040 SIO
+divider model is not used. Ordinary unaligned accesses are allowed, as with
+`CCR.UNALIGN_TRP` clear; instructions requiring alignment remain subject to
+Unicorn's checks. All production accesses remain covered by allocation guards.
+Alignment rules are documented in the [Arm Cortex-M33 Generic User Guide,
+section 3.3.5](https://documentation-service.arm.com/static/66be2153882fec713ef49e49).
+
+The suite adds first-span lengths of 1, 2, 3 and columns minus one at VRAM
+wrapping, plus a combined MSB/blink/cursor/odd-pointer case. These check paired
+or unrolled loop tails. Use `--variant all_odd_tail` for the same combination
+over a complete 525-line frame. Other full-frame variants include `normal`,
+`msb`, `all`, `hidden`, `unaligned`, `font8`, `font14` and `font_stride32`.
+The separate `--kernels` sweep calls the real linked kernels for every span
+length 0..80 / 0..40, both bit orders, aligned/odd input bases, and output
+addresses congruent to 0 or 4 modulo 8. It checks every pixel, ABI preservation,
+exactly one font-byte read per cell, and strict input/output span bounds. This
+covers zero-length returns, each unrolled-loop tail and four-byte-aligned STRD.
+
+Memory counters describe Unicorn read/write events and byte sizes. They are
+not physical bus transactions or bandwidth measurements. Executed instruction
+bytes are the sum of instruction encoding lengths, not instruction-cache
+traffic. Register/stack checks include r4..r11 and SP, while hardware exception
+stacking remains outside the trace. On-board GPIO timing with the actual
+emulator is still required for M33 CPU utilization and worst-line latency.

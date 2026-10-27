@@ -1,5 +1,9 @@
 # HDMI text command transport: validation and RAM accounting
 
+This report covers the first PIO revision. For the subsequent RP2350/M33
+optimization against commit `231f1fa`, see
+[HDMI_TEXT_RP2350.md](HDMI_TEXT_RP2350.md).
+
 Baseline: `xrip/rp2040-ntsc-tv`, branch `vga-tv-hybrid`, commit
 `34f401e07bb4ade91ec604512b086d9b368efad3`. Date: 2026-10-26.
 This report supersedes the earlier byte-index text implementation's measurements.
