@@ -1,6 +1,6 @@
 #include <graphics.h>
 
-#if defined(NTSC_TV)
+#if defined(NTSC_TV) && !defined(HDMI_HSTX)
 
 #include <stddef.h>
 

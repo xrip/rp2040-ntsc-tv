@@ -1,9 +1,13 @@
 # RP2040/RP2350 VGA, NTSC, HDMI, and TFT video output
 
 This project gives VGA, color NTSC composite, HDMI, or TFT output from one
-Raspberry Pi Pico framebuffer. VGA and NTSC can run together. HDMI and TFT are
-single-output forms. The project builds for both RP2040/Cortex-M0+ and
-RP2350/Cortex-M33.
+Raspberry Pi Pico framebuffer. VGA and NTSC can run together. On RP2350, the
+new HSTX backend can also run HDMI and color NTSC together, with USB disabled.
+Legacy PIO HDMI remains a single-output form. The project builds for both
+RP2040/Cortex-M0+ and RP2350/Cortex-M33.
+
+For the simultaneous HSTX + NTSC build, use `rp2350-hstx-ntsc` or
+`rp2350-hstx-ntsc-text`. See [HSTX + NTSC setup, clocks, and validation](docs/HSTX_NTSC.md).
 
 Every output scans out one exact format:
 

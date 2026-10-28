@@ -5,7 +5,7 @@ target_sources(graphics INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/graphics_modes.c
 )
 
-if (HDMI)
+if (HDMI OR HDMI_HSTX)
     target_sources(graphics INTERFACE ${CMAKE_CURRENT_LIST_DIR}/graphics_text.c)
 endif()
 

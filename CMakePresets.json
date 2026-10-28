@@ -21,6 +21,7 @@
         "VGA": "ON",
         "NTSC_TV": "ON",
         "HDMI": "OFF",
+        "HDMI_HSTX": "OFF",
         "TFT": "OFF",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
@@ -42,6 +43,7 @@
         "VGA": "ON",
         "NTSC_TV": "ON",
         "HDMI": "OFF",
+        "HDMI_HSTX": "OFF",
         "TFT": "OFF",
         "NTSC_LOW_RAM": "OFF",
         "NTSC_USE_SCRATCH_Y": "OFF"
@@ -87,6 +89,30 @@
       "binaryDir": "${sourceDir}/cmake-build-rp2350-hdmi-text",
       "cacheVariables": {
         "PICOTOOL_FETCH_FROM_GIT_PATH": "${sourceDir}/cmake-build-tools/picotool",
+        "HDMI_TEXT_DEMO": "ON",
+        "GRAPHICS_BUILTIN_FRAMEBUFFER": "OFF"
+      }
+    },
+    {
+      "name": "rp2350-hstx-ntsc",
+      "displayName": "RP2350 / HSTX HDMI + NTSC",
+      "inherits": "rp2350",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-hstx-ntsc",
+      "cacheVariables": {
+        "PICOTOOL_FETCH_FROM_GIT_PATH": "${sourceDir}/cmake-build-tools/picotool",
+        "VGA": "OFF",
+        "NTSC_TV": "ON",
+        "HDMI": "OFF",
+        "HDMI_HSTX": "ON",
+        "HDMI_TEXT_DEMO": "OFF"
+      }
+    },
+    {
+      "name": "rp2350-hstx-ntsc-text",
+      "displayName": "RP2350 / HSTX HDMI + NTSC text palette",
+      "inherits": "rp2350-hstx-ntsc",
+      "binaryDir": "${sourceDir}/cmake-build-rp2350-hstx-ntsc-text",
+      "cacheVariables": {
         "HDMI_TEXT_DEMO": "ON",
         "GRAPHICS_BUILTIN_FRAMEBUFFER": "OFF"
       }

@@ -114,14 +114,20 @@ static uint32_t NTSC_PALETTE_PLACEMENT("ntsc_palette_odd") ntsc_palette_odd[256]
 // the same artifact color the older driver produced, and it keeps all 640
 // samples of the line instead of dropping to 320 double-width pixels.
 //
-// The 16 values are the zero-chroma form of the palette maths below. They are
-// read-only, so they stay in flash and cost no RAM.
+// The 16 values are the zero-chroma form of the palette maths below. Legacy
+// configurations keep this read-only table in flash.
 #define NTSC_TEXT_LUMINANCE(color) ((150u * GRAPHICS_CGA_GREEN(color) + \
         29u * GRAPHICS_CGA_BLUE(color) + 77u * GRAPHICS_CGA_RED(color) + 128u) / 256u)
 #define NTSC_TEXT_SAMPLE(color) \
     (uint16_t)((NTSC_TEXT_LUMINANCE(color) * 1792u + 2u * 65536u + 32768u) / 65536u),
 
+#if defined(HDMI_HSTX)
+// The shared descriptor renderer runs alongside HSTX: keep this 32-byte table
+// in SRAM so its scanline path does not add XIP reads under combined load.
+static uint16_t __not_in_flash("ntsc_text_sample") ntsc_text_sample[16] = {
+#else
 static const uint16_t ntsc_text_sample[16] = {
+#endif
         GRAPHICS_TEXT_COLORS(NTSC_TEXT_SAMPLE)
 };
 
@@ -180,6 +186,37 @@ static inline uint32_t ntsc_unpack_pair(uint32_t pair) {
 // One text scanline: 80 columns of 8 pixels fill all 640 active samples, one
 // sample for each pixel, so the line keeps its full width.
 static inline void ntsc_generate_text_line(uint16_t *output, const size_t active_line) {
+#if defined(HDMI_HSTX)
+    // Both outputs borrow the same text VRAM/font descriptor. Composite samples
+    // every second physical HDMI row while retaining all 640 horizontal samples.
+    // HSTX alone advances the shared blink counter; NTSC only reads it.
+    struct graphics_text_line text;
+    if (!graphics_text_line((unsigned)active_line, NTSC_FRAME_HEIGHT, &text)) {
+        for (unsigned x = 0; x < GRAPHICS_TEXT_SAMPLES; ++x) {
+            *output++ = ntsc_text_sample[0];
+        }
+        return;
+    }
+
+    const bool wide = text.columns == 40u;
+    for (unsigned column = 0; column < text.columns; ++column) {
+        const uint16_t cell = graphics_text_cell(&text, column);
+        const uint8_t attribute = (uint8_t)(cell >> 8);
+        uint8_t glyph = graphics_text_glyph(&text, column, (uint8_t)cell, attribute);
+        const unsigned background = (attribute >> 4) & (text.blink_enabled ? 7u : 15u);
+        const uint16_t colors[2] = {
+            ntsc_text_sample[background], ntsc_text_sample[attribute & 15u]
+        };
+        for (unsigned bit = 0; bit < 8u; ++bit) {
+            const uint16_t sample = colors[glyph & 1u];
+            glyph >>= 1u;
+            *output++ = sample;
+            if (wide) {
+                *output++ = sample;
+            }
+        }
+    }
+#else
     unsigned glyph_line;
     const uint8_t *cell = graphics_text_row(active_line, NTSC_TEXT_FONT_HEIGHT,
                                             &glyph_line);
@@ -212,6 +249,7 @@ static inline void ntsc_generate_text_line(uint16_t *output, const size_t active
             }
         }
     }
+#endif
 }
 
 static inline void ntsc_generate_scanline(uint16_t *output_buffer, const size_t scanline_number) {

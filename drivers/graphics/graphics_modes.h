@@ -72,6 +72,8 @@ extern "C" {
 // interrupts.
 //
 // The returned pointer is good until the next call from the same backend.
+// After a source-buffer rebind, keep the old allocation alive until all
+// in-flight scanlines have finished reading it; rebinding does not copy pixels.
 const uint8_t *graphics_source_line(const uint8_t *framebuffer,
                                     unsigned row,
                                     uint8_t *staging);
@@ -93,6 +95,11 @@ const uint8_t *graphics_text_row(unsigned line,
                                  unsigned *glyph_line);
 
 // State, set from the backend graphics_set_* functions.
+#if defined(HDMI_HSTX)
+// Call once on the scanout core before enabling either output IRQ. Setters
+// remain usable before initialization while no scanout is running.
+void graphics_source_init(void);
+#endif
 void graphics_source_set_mode(enum graphics_mode_t mode);
 void graphics_source_set_buffer(uint8_t *buffer, uint16_t width, uint16_t height);
 void graphics_source_set_offset(int x, int y);

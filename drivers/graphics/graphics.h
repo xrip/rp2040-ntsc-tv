@@ -22,6 +22,9 @@ extern "C" {
 #ifdef HDMI
 #include "hdmi.h"
 #endif
+#ifdef HDMI_HSTX
+#include "hdmi_hstx.h"
+#endif
 #ifdef VGA
 #include "vga.h"
 #endif
@@ -41,7 +44,7 @@ extern "C" {
 #include "font8x8.h"
 #include "font8x16.h"
 
-#if defined(HDMI)
+#if defined(HDMI) || defined(HDMI_HSTX)
 #include "graphics_text.h"
 #endif
 

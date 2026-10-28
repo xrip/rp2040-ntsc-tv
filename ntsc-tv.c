@@ -807,11 +807,22 @@ static void demo_render_text_frame(void) {
     absolute_time_t next_frame = get_absolute_time();
 #if DEMO_HAS_TEXT_PART
     uint32_t part_frame = 0;
+#if defined(HDMI_HSTX)
+    // Show color graphics first so composite color lock can be checked
+    // immediately; the shared text/font part follows in the usual cycle.
+    bool text_part = false;
+#else
     bool text_part = true;
+#endif
 
+#if defined(HDMI_HSTX)
+    // The two outputs borrow one application-owned font. NTSC takes alternate
+    // physical rows of this same 480-line text picture.
+    graphics_set_text_font(font_8x16, 16u, 16u, false);
+#endif
     graphics_set_textbuffer(demo_text_buffer);
     demo_render_text_frame();
-    graphics_set_mode(TEXTMODE_DEFAULT);
+    graphics_set_mode(text_part ? TEXTMODE_DEFAULT : VGA_320x240x256);
 #endif
 
     while (true) {
