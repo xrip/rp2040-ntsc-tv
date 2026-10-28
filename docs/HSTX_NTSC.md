@@ -108,7 +108,7 @@ circuit. These are RP2350 GPIO numbers, not HDMI connector pin numbers.
 | HDMI data 0 minus / plus (blue/control) | 14 / 15 |
 | HDMI data 1 minus / plus (green) | 16 / 17 |
 | HDMI data 2 minus / plus (red) | 18 / 19 |
-| NTSC composite | 28 by default (`NTSC_PIN_OUTPUT`) |
+| NTSC composite | 22 in these presets (`NTSC_PIN_OUTPUT`) |
 
 The old PIO HDMI pin options do not remap HSTX. This backend has the above
 fixed pairing and polarity. Its video is DVI-compatible TMDS over the HDMI

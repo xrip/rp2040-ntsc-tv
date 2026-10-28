@@ -104,7 +104,8 @@
         "NTSC_TV": "ON",
         "HDMI": "OFF",
         "HDMI_HSTX": "ON",
-        "HDMI_TEXT_DEMO": "OFF"
+        "HDMI_TEXT_DEMO": "OFF",
+        "NTSC_PIN_OUTPUT": "22"
       }
     },
     {
