@@ -2,8 +2,8 @@
 
 This project gives VGA, color NTSC composite, HDMI, or TFT output from one
 Raspberry Pi Pico framebuffer. VGA and NTSC can run together. On RP2350, the
-new HSTX backend can also run HDMI and color NTSC together, with USB disabled.
-Legacy PIO HDMI remains a single-output form. The project builds for both
+HSTX backend can also run HDMI and color NTSC together, with USB disabled.
+The PIO HDMI backend remains a single-output form. The project builds for both
 RP2040/Cortex-M0+ and RP2350/Cortex-M33.
 
 For the simultaneous HSTX + NTSC build, use `rp2350-hstx-ntsc` or
@@ -41,14 +41,19 @@ over the whole 80 x 30 screen, and gets sixteen steps of heat out of six CGA
 colors by drawing the CP437 shade characters over a darker background. It is
 also the one part of the demo that exercises a text mode.
 
-The default HDMI and TFT demos run the graphics part alone. HDMI additionally
-supports native 640 x 480 text from application-owned VRAM and a supplied font.
-The separate `rp2040-hdmi-text` / `rp2350-hdmi-text` demo shows all 16 foreground
-and background colors, and cycles through 80 x 30, 80 x 25, and 40 x 25 for
-eight seconds each, followed by 60 seconds of the original ball, torus, and helix
-graphics demo.
-See [HDMI text and emulator integration](docs/HDMI_TEXT.md). TFT continues to
-scan the graphics framebuffer directly.
+The default HDMI demo runs the graphics part alone: the PIO HDMI build has no
+text part in `ntsc-tv.c`. HDMI additionally supports native 640 x 480 text from
+application-owned VRAM and a supplied font. The separate `rp2040-hdmi-text` /
+`rp2350-hdmi-text` demo shows all 16 foreground and background colors, and
+cycles through 80 x 30, 80 x 25, and 40 x 25 for eight seconds each, followed
+by 60 seconds of the original ball, torus, and helix graphics demo.
+See [HDMI text and emulator integration](docs/HDMI_TEXT.md). The TFT driver
+uses the same composer as the other outputs, so it renders the text modes as
+well as the 320 x 240 picture.
+
+The HSTX demo starts with the graphics part, so the composite color lock can be
+checked before the text part begins, and then cycles through text and graphics
+like the PIO text demo does.
 
 ## Dual VGA and NTSC system map
 
@@ -83,6 +88,36 @@ In the demo, core 0 starts the hardware and owns both DMA IRQ handlers. Core 1
 draws frames. The graphics library itself does not start core 1; that is done
 by `ntsc-tv.c`.
 
+## HSTX HDMI and NTSC system map
+
+```text
+                         core 1
+                    demo_render_frame()
+                             |
+                    320 x 240 index-8
+                    front/back buffers
+                             |
+             graphics_present_framebuffer()
+                      /              \
+            HSTX pending pointer   NTSC pending pointer
+                    |                    |
+            HSTX frame boundary   NTSC frame boundary
+                    |                    |
+         HSTX line slots + DMA     NTSC scanline generator
+                    |                    |
+             DMA_IRQ_1 (shared)          PWM
+                    |                    |
+            GPIO 12..19 fixed      GPIO 22 in these presets
+```
+
+HSTX owns GPIO12 through GPIO19 for its clock and data pairs. VGA and TFT use
+pins in that range, so CMake rejects those combinations.
+
+The HSTX picture is 640 x 480 at 60 Hz from the same 320 x 240 indexed source.
+The serializer doubles each horizontal pixel, and each source row supplies two
+HDMI lines. Its scanout keeps four 640-pixel line slots and alternates command
+and pixel transfers over two DMA channels.
+
 ## Source files and ownership
 
 ### `ntsc-tv.c`
@@ -113,13 +148,28 @@ The renderer uses two full framebuffers:
 No full-frame copy is made during presentation. Only framebuffer pointers are
 changed.
 
+### `demo-graphics.h`
+
+This holds the 3D drawing code the demo uses: the floor, the wave, the ball,
+the torus, and the helix, with their lookup tables. It draws into a
+framebuffer the caller owns, so the same code serves every build.
+
+### `hdmi-text-demo.c`
+
+This is the separate HDMI text demo. `HDMI_TEXT_DEMO=ON` builds it instead of
+the plain `ntsc-tv.c` application. It owns one 4,800-byte text page and two
+graphics buffers, uses the repository's own `font_8x16`, shows all 16 text
+colors, cycles 80 x 30, 80 x 25, and 40 x 25, and then runs the 3D scenes from
+`demo-graphics.h`. See [docs/HDMI_TEXT.md](docs/HDMI_TEXT.md).
+
 ### `drivers/graphics`
 
 This folder has the common public `graphics.h` interface, fonts, text/window
 drawing helpers, and the one public `graphics_init()` function. The selected
 output module supplies the other `graphics_*` display functions.
 
-The same public calls are used for VGA, NTSC, dual output, HDMI, and TFT:
+The same public calls are used for VGA, NTSC, dual output, HDMI, HSTX HDMI, and
+TFT:
 
 - `graphics_init()` sets any clock required by the selected form, then starts
   the selected output or outputs;
@@ -138,9 +188,14 @@ The same public calls are used for VGA, NTSC, dual output, HDMI, and TFT:
 `graphics_modes.c` in the same folder is the shared scanline composer. It holds
 the mode, the application buffer and its size, the offset, and the text-buffer
 pointer, and turns them into one 320-byte line of palette indices for any
-output row. VGA and NTSC call it once for each source row, each with its own
-320-byte scratch line, because the two run from separate interrupts. The mode
+output row. VGA, NTSC, and HSTX call it once for each source row, each with its
+own 320-byte scratch line, because they run from separate interrupts. The mode
 work is therefore written once, not once for each backend.
+
+In an HSTX build the composer state is published under a spin lock, because the
+HSTX and NTSC interrupts can read it at the same time. `graphics_source_init()`
+claims that lock; it is called once by the HSTX graphics adapter before any
+scanout IRQ runs.
 
 Two API calls have no effect in the fixed 320 x 240 output forms:
 
@@ -186,6 +241,7 @@ buffer, one sample for each pixel:
 |---|---|---|---|
 | VGA | 640 x 480 | 8x16, 480 / 16 = 30 rows | one 8-bit DAC value |
 | NTSC | 640 x 240 | 8x8, 240 / 8 = 30 rows | one PWM luminance value |
+| HSTX | 640 x 480 | 8x16, 480 / 16 = 30 rows | one BGR555 value |
 
 VGA therefore builds a line for every one of its 480 physical lines while a
 text mode is selected, instead of one line for every two.
@@ -195,6 +251,12 @@ text pixel is sent as luminance only and the receiver makes the color back from
 the pixel pattern itself. This is NTSC artifact color, the same result the older
 driver gave, and it keeps all 640 samples instead of dropping to 320
 double-width pixels.
+
+In an HSTX build the two outputs share one text VRAM and one font. HSTX draws
+the full 640 x 480 picture, and NTSC takes alternate physical rows of that
+picture while keeping all 640 horizontal samples. HSTX alone advances the
+shared blink counter; NTSC only reads it. NTSC text keeps its own luminance
+and artifact colors, so it does not reproduce the 16 RGB text colors of HDMI.
 
 The pixel loop stays in each backend rather than in the composer: the two have
 different sample sizes and very different time budgets for one line. The
@@ -211,9 +273,14 @@ neither is computed at run time:
 | Table | Size | Reads per line | Where | Use |
 |---|---:|---:|---|---|
 | `vga_dual_text_pairs` | 2,048 B | 320 | RAM | attribute and two glyph bits to two VGA bus values |
-| `font_8x16` | 4,096 B | 80 | flash | VGA glyph rows |
+| `font_8x16` | 4,096 B | 80 | flash | VGA and HSTX glyph rows |
 | `font_8x8` | 2,048 B | 80 | flash | NTSC glyph rows |
 | `ntsc_text_sample` | 32 B | 0 | flash | CGA color to one PWM luminance value |
+| `text_palette` | 32 B | 80 | RAM | CGA color to one BGR555 value, HSTX only |
+
+The HSTX text palette is kept in RAM on purpose, and so is `ntsc_text_sample`
+in an HSTX build: the shared text renderer then reads no flash while the HSTX
+scanout is running.
 
 VGA writes two pixels for each 16-bit store, so a text line costs four table
 reads and four stores for each character cell.
@@ -271,6 +338,9 @@ drivers. The VGA-only adapter compiles to an empty unit in that form.
 
 ### `drivers/hdmi`
 
+This is the PIO HDMI backend, with the CMake target `hdmi`. The RP2350 has a
+second, separate HDMI path in `drivers/hdmi-hstx`; `HDMI=ON` selects this one.
+
 This module sends 640 x 480 timing with either doubled 320 x 240 indexed graphics
 or native-resolution text. It uses one PIO state machine
 for TMDS output, one PIO state machine for glyph expansion/palette addressing, four DMA
@@ -297,6 +367,43 @@ RP2350 Arm has dedicated M33 Thumb-2 text and fill loops; their linked-code
 instruction counts and RAM comparison are in
 [docs/HDMI_TEXT_RP2350.md](docs/HDMI_TEXT_RP2350.md).
 
+### `drivers/hdmi-hstx`
+
+This is the RP2350 HSTX backend, with the CMake target `hdmi-hstx`. It is a
+second HDMI path, not a replacement for `drivers/hdmi`: this one uses the
+chip's own TMDS encoder instead of a PIO state machine.
+
+- `hstx_video.c` is the low-level serializer: it configures the encoder,
+  claims two DMA channels and a shared `DMA_IRQ_1` handler, and fills the FIFO
+  with alternating command and pixel transfers;
+- `hstx_video.h` gives that internal API;
+- `hstx_render.h` holds the BGR555 conversion and the two scanline renderers;
+- `graphics.c` implements the public `graphics.h` API for this backend.
+
+It sends 640 x 480 at exactly 60 Hz on GPIO12..19: clock minus and plus on
+12/13, and the three data pairs on 14/15, 16/17, and 18/19. The signal is
+DVI-compatible TMDS over the HDMI connector: no audio, no data islands, and no
+EDID or DDC. The pins are fixed and the old `HDMI_BASE_PIN` does not move them.
+
+Linking this target adds `HDMI_HSTX=1`. It may run together with NTSC, but not
+with VGA, TFT, or the PIO HDMI backend, because it owns GPIO12..19 and it has
+its own graphics adapter.
+
+The clock plan gives PLL_USB to HSTX at 126 MHz and keeps PLL_SYS at 315 MHz,
+so the NTSC timebase does not change. The USB and ADC clocks stop and their
+peripherals are held in reset, and the build has no USB stdio. The full plan
+is in [docs/HSTX_NTSC.md](docs/HSTX_NTSC.md).
+
+### `drivers/rgb`
+
+This is a 15 kHz RGBs (SCART) generator, with the CMake target `rgb`. It is
+not wired into the build: nothing calls `add_subdirectory(drivers/rgb)`, and
+its `CMakeLists.txt` names a `tv.c` which is not here, so it will not build as
+it stands. It is in the tree to be read and worked on.
+
+The `RGBS=ON` option is a different thing: it selects the 240p RGBs timing on
+the VGA pins inside `drivers/vga`.
+
 ### `drivers/st7789`
 
 This is the fixed 320 x 240 indexed TFT module for the ST7789-compatible PIO
@@ -304,12 +411,17 @@ interface. It converts each palette entry to RGB565 and sends a complete frame
 when `graphics_present_framebuffer()` is called. TFT does not change the system
 clock.
 
+It reads the shared composer, so a text mode works here too: the panel draws
+40 cells of the 8x8 font, 320 pixels wide, and leaves the rest of the line
+blank.
+
 ## Clock tree
 
 The selected form owns any required chip-wide clock change:
 
 ```text
 NTSC or dual : clk_sys = 315 MHz
+HSTX + NTSC  : clk_sys = 315 MHz, clk_hstx = 126 MHz from PLL_USB
 HDMI         : clk_sys = 378 MHz
 VGA or TFT   : no clock change
 ```
@@ -319,6 +431,14 @@ NTSC and HDMI ask for a higher core voltage before making their clock change.
 In dual output this clock is used by both outputs. VGA-only does not change the
 system clock or core voltage; its PIO divider is made from the clock set by the
 application.
+
+The HSTX form keeps the NTSC clock plan intact and takes PLL_USB for the
+encoder instead. PLL_USB is reprogrammed to 126 MHz, the peripheral clock
+moves to `clk_sys / 3`, and the USB and ADC clocks stop with their
+peripherals held in reset. That last part is why an HSTX build has no USB
+stdio. The driver also reads back the real PLL and clock registers, because
+HSTX has no fractional divider and a wrong divider would not show up in the
+cached frequency.
 
 ### NTSC sample clock
 
@@ -408,9 +528,9 @@ framebuffer + y * 320
 
 ### NTSC palette
 
-`graphics_set_palette(index, RGB888)` calls `ntsc_tv_set_palette()`. The driver
-uses integer math to get luminance and two chroma parts. It then makes four
-PWM values for the four subcarrier phases.
+`graphics_set_palette(index, RGB888)` calls `ntsc_composite_set_palette()`. The
+driver uses integer math to get luminance and two chroma parts. It then makes
+four PWM values for the four subcarrier phases.
 
 The normal palette form has two tables:
 
@@ -589,8 +709,12 @@ Both DMA handlers use `__time_critical_func`, so Pico SDK puts the hot IRQ code
 in RAM, and so do the composer entry points they call every line. Data that the
 handlers read every line has to be in RAM as well; see
 [Text lookup tables](#text-lookup-tables).
-`drivers/ntsc-composite/ntsc-composite.c` also asks GCC for `O3` on its code. The root build uses `O3`, LTO, whole-program work,
-function sections, and data sections.
+The root build uses `O3`, LTO, function sections, and data sections for every
+file. It does not use `-fwhole-program`: that flag tells the compiler the file
+it is reading is the whole program, so every symbol but `main` may be made
+static. Each file then believed it was alone, `graphics_source_set_mode()` was
+dropped as dead, and `graphics_set_mode()` did nothing, so text mode never came
+on. LTO already does that analysis across files.
 
 ## Framebuffer presentation
 
@@ -618,6 +742,11 @@ This is frame-request synchronization, not signal or scanline lock. VGA and
 NTSC have separate counters and different frame structures. For a short time,
 one output may show the new buffer while the other still shows the old one.
 
+In an HSTX build the same call publishes the pointer to both outputs and waits
+for the NTSC latch and the HSTX latch. The two outputs are not frame locked
+there either: HSTX runs at 60 Hz while the NTSC raster keeps its own frame
+rate, so a frame can reach the two connectors at slightly different times.
+
 In a single-output build the same call requests and waits for that one output
 only.
 
@@ -636,6 +765,10 @@ The current demo has this split:
 `graphics_init()` installs and enables each selected output's exclusive DMA IRQ
 handler on the core which calls it. In this demo that is core 0. An application
 which calls it from another core will change IRQ ownership.
+
+In an HSTX build `graphics_init()` must run once on core 0, before core 1 is
+started, and the driver panics otherwise. The HSTX and NTSC scanouts then both
+run on core 0, and core 1 does the drawing.
 
 ## Hardware resources and integration effects
 
@@ -667,9 +800,23 @@ VGA pins. NTSC-only takes two DMA channels, DMA IRQ 0, one PWM slice, and one
 GPIO. Only a form with NTSC changes the system clock and core voltage, and only
 when `GRAPHICS_NO_CLOCK_SETUP` is off.
 
+The HSTX form takes these resources:
+
+| Resource | Current use |
+|---|---|
+| System clock | changed to 315 MHz, as the NTSC form does |
+| PLL_USB | reprogrammed to 126 MHz for the encoder |
+| Peripheral clock | moved to `clk_sys / 3` |
+| USB and ADC | clocks stopped, peripherals held in reset |
+| DMA channels | two claimed channels |
+| DMA IRQ 1 | shared handler at the highest priority |
+| GPIO | GPIO12..19, fixed |
+
 The exclusive IRQ handlers are important when this code is put into a larger
 program: another module cannot also install an exclusive handler on the same
-DMA IRQ. A shared IRQ design is not present now.
+DMA IRQ. The HSTX backend is the one exception: it installs a shared handler
+on DMA IRQ 1 and acknowledges only its own DMA channel bits, so another module
+can use the same IRQ.
 
 ## Main static RAM use
 
@@ -693,6 +840,15 @@ The largest fixed blocks in the default dual demo are:
 | NTSC composer scratch line | 320 |
 | Shared blank line | 320 |
 
+The HSTX form adds these blocks. It does not allocate a full RGB framebuffer:
+
+| Block | Bytes |
+|---|---:|
+| HSTX line slots, four 640-pixel buffers | 5,120 |
+| HSTX graphics palette | 512 |
+| HSTX text palette | 32 |
+| HSTX staging line | 320 |
+
 The demo also has ball sprites, floor tables, wave tables, and small object
 tables. SDK state, stacks, and code-in-RAM add to the final RAM use.
 
@@ -715,9 +871,9 @@ The scanout is not format-neutral.
 - The VGA signal is fixed at 640 x 480 timing.
 - The NTSC signal and active window are fixed.
 - Only the modes listed above crop, scale, or centre; the rest are direct.
-- The composer described here is used by VGA and NTSC only. HDMI has its own
-  native text renderer and otherwise takes the direct 320 x 240 graphics buffer.
-  TFT takes the direct graphics buffer and ignores `graphics_set_mode()`.
+- The composer described here is used by VGA, NTSC, TFT, and HSTX. The PIO HDMI
+  backend has its own native text renderer and otherwise takes the direct
+  320 x 240 graphics buffer.
 
 Changing the 320 x 240 line and frame size itself is not enough. The row address
 math, scanline loops, palette form, active area, DMA count, and line buffer
@@ -748,14 +904,16 @@ it.
 
 ## Build system
 
-The project uses CMake 3.21 or newer, Pico SDK, and C23. The first four options
-select the output modules; the rest tune them:
+The project uses CMake 3.21 or newer, Pico SDK, and C23. The options that select
+the output modules come first; the rest tune them:
 
 | CMake option | Default | Effect |
 |---|---:|---|
 | `VGA` | `ON` | link `vga` and set `VGA=1` |
+| `RGBS` | `OFF` | use 15 kHz 240p RGBs (SCART) timing on the VGA pins |
 | `NTSC_TV` | `ON` | link `ntsc-composite` and set `NTSC_TV=1` |
 | `HDMI` | `OFF` | link `hdmi` and set `HDMI=1` |
+| `HDMI_HSTX` | `OFF` | link `hdmi-hstx` and set `HDMI_HSTX=1` |
 | `HDMI_TEXT_DEMO` | `OFF` | HDMI text/3D cycle with application-owned graphics buffers |
 | `HDMI_PROFILE_GPIO` | `-1` | Optional GPIO high during the HDMI IRQ; choose an unused pin |
 | `TFT` | `OFF` | link `st7789` and set `TFT=1` |
@@ -769,7 +927,7 @@ The default is GPIO28 because it is the pin most often left free: sound hardware
 tends to take GPIO26 and GPIO27, which share PWM slice 5 with each other.
 Set `NTSC_PIN_OUTPUT` when GPIO28 does not suit the board. A CMake value beats
 the header default, and any GPIO works, odd or even. Pick one whose PWM slice
-nothing else uses.
+nothing else uses. The `rp2350-hstx-ntsc` presets set it to GPIO22.
 
 Turn `GRAPHICS_BUILTIN_FRAMEBUFFER` off when the application gives its own
 picture buffer through `graphics_set_buffer()`. This drops 76,800 bytes of RAM
@@ -778,20 +936,27 @@ and makes `graphics_get_framebuffer()` give `NULL`.
 Turn `GRAPHICS_NO_CLOCK_SETUP` on when the application must fix the system clock
 itself, for example before it starts a second core. `graphics_init()` then makes
 no clock or core-voltage change, and the application has to supply the clock the
-selected form needs: 315 MHz for NTSC or dual, 378 MHz for HDMI.
+selected form needs: 315 MHz for NTSC or dual, 378 MHz for HDMI, and for HSTX
+315 MHz with a 126 MHz `clk_hstx` and the USB and ADC clocks stopped. The HSTX
+driver still checks the real PLL and clock registers in that mode.
 
-This gives five supported forms:
+This gives these supported forms:
 
 | Form | CMake values | Driver targets |
 |---|---|---|
 | VGA | `VGA=ON`, `NTSC_TV=OFF` | `graphics`, `vga` |
+| RGBs | `VGA=ON`, `RGBS=ON`, `NTSC_TV=OFF` | `graphics`, `vga` |
 | NTSC | `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `ntsc-composite` |
-| Dual | `VGA=ON`, `NTSC_TV=ON` | all three targets |
+| Dual | `VGA=ON`, `NTSC_TV=ON` | `graphics`, `vga`, `ntsc-composite` |
 | HDMI | `HDMI=ON`, all other outputs off | `graphics`, `hdmi` |
-| TFT | `TFT=ON`, all other outputs off | `graphics`, `st7789` |
+| HSTX + NTSC | `HDMI_HSTX=ON`, `NTSC_TV=ON` | `graphics`, `hdmi-hstx`, `ntsc-composite` |
+| TFT | `TFT=ON`, `VGA=OFF` | `graphics`, `st7789` |
+| TFT + NTSC | `TFT=ON`, `VGA=OFF`, `NTSC_TV=ON` | `graphics`, `st7789`, `ntsc-composite` |
 
-CMake stops with an error if every output is off, if HDMI or TFT is combined
-with VGA or NTSC, or if HDMI and TFT are both selected.
+CMake stops with an error if every output is off, if `RGBS` is on without
+`VGA`, if HDMI or TFT is combined with VGA, if HDMI is combined with NTSC or
+TFT, if `HDMI_HSTX` is combined with VGA, TFT, or HDMI, or if `HDMI_HSTX` is
+used on any platform but `rp2350-arm-s`. TFT with NTSC is allowed.
 
 ### Use in another project
 
@@ -834,6 +999,10 @@ The old multi-mode VGA driver cannot be used in this dual form because it owns
 the same public `graphics_*` names. NTSC-only use needs only the new
 `drivers/ntsc-composite` folder.
 
+For the HSTX backend, also copy `drivers/hdmi-hstx` and link it. It needs
+`PICO_PLATFORM=rp2350-arm-s`, it may not be linked with the `vga`, `hdmi`, or
+`st7789` targets, and it takes GPIO12..19 for itself.
+
 `pico_add_extra_outputs()` makes ELF, BIN, HEX, disassembly, and UF2 output.
 
 ### CLion and command-line presets
@@ -852,28 +1021,42 @@ cmake --build cmake-build-rp2350 --target ntsc-tv
 
 The output presets include:
 
-| Preset | Board | Platform | CPU |
-|---|---|---|---|
-| `rp2040` | `pico` | `rp2040` | Cortex-M0+ |
-| `rp2350` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
-| `rp2040-hdmi` | `pico` | `rp2040` | Cortex-M0+ |
-| `rp2350-hdmi` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
-| `rp2040-hdmi-text` | `pico` | `rp2040` | Cortex-M0+ |
-| `rp2350-hdmi-text` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
-| `rp2040-tft` | `pico` | `rp2040` | Cortex-M0+ |
-| `rp2350-tft` | `pico2` | `rp2350-arm-s` | Cortex-M33 |
+| Preset | Board | Platform | CPU | UF2 file |
+|---|---|---|---|---|
+| `rp2040` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv.uf2` |
+| `rp2350` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv.uf2` |
+| `rp2040-hdmi` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv-hdmi.uf2` |
+| `rp2350-hdmi` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-hdmi.uf2` |
+| `rp2040-hdmi-text` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv-hdmi-text.uf2` |
+| `rp2350-hdmi-text` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-hdmi-text.uf2` |
+| `rp2350-hstx-ntsc` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-hstx-composite.uf2` |
+| `rp2350-hstx-ntsc-text` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-hstx-composite-text.uf2` |
+| `rp2040-tft` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv-tft.uf2` |
+| `rp2350-tft` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-tft.uf2` |
+| `rp2040-tft-ntsc` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv-tft-composite.uf2` |
+| `rp2350-tft-ntsc` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-tft-composite.uf2` |
+| `rp2040-rgbs` | `pico` | `rp2040` | Cortex-M0+ | `ntsc-tv-rgbs.uf2` |
+| `rp2350-rgbs` | `pico2` | `rp2350-arm-s` | Cortex-M33 | `ntsc-tv-rgbs.uf2` |
 
 These presets use `MinSizeRel`, Ninja, UF2 output, normal NTSC palette RAM, and no
-scratch placement. `rp2040` and `rp2350` select VGA plus NTSC; the `-hdmi` and
-`-tft` presets turn both of those off and select their own single output. The
-RP2350 presets also set `PICO_NO_COPRO_DIS=ON`. The `-hdmi-text` presets build the
-text palette demo with `GRAPHICS_BUILTIN_FRAMEBUFFER=OFF` and use a portable
-picotool fetch directory under `cmake-build-tools/picotool`.
+scratch placement. `rp2040` and `rp2350` select VGA plus NTSC; the `-hdmi`,
+`-tft`, `-tft-ntsc`, and `-rgbs` presets turn both of those off and select their
+own output. The RP2350 presets also set `PICO_NO_COPRO_DIS=ON`. The `-hdmi-text`
+and `-hstx-ntsc` presets build the text demo with
+`GRAPHICS_BUILTIN_FRAMEBUFFER=OFF` and use a portable picotool fetch directory
+under `cmake-build-tools/picotool`. The `-hstx-ntsc` presets also set
+`NTSC_PIN_OUTPUT=22`.
 
 Picotool is fetched under:
 
 ```text
-$env{TEMP}/picotool-2.3.0-x64-win
+$env:TEMP/picotool-2.3.0-x64-win
+```
+
+or, for the text and HSTX presets:
+
+```text
+cmake-build-tools/picotool
 ```
 
 Build products are put in:
@@ -883,8 +1066,8 @@ bin/rp2040/MinSizeRel/
 bin/rp2350-arm-s/MinSizeRel/
 ```
 
-The file to copy to a board is `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`,
-`ntsc-tv-hdmi-text.uf2`, or `ntsc-tv-tft.uf2` in the matching directory.
+The file to copy to a board is the one named in the table above, in the
+matching directory.
 
 For the HDMI text test:
 
@@ -905,7 +1088,8 @@ NTSC is disabled in these builds; its driver is unchanged.
 
 ### NTSC composite
 
-The default output pin is GPIO28; `NTSC_PIN_OUTPUT` moves it.
+The default output pin is GPIO28; `NTSC_PIN_OUTPUT` moves it. The
+`rp2350-hstx-ntsc` presets set it to GPIO22.
 
 ```text
 NTSC_PIN_OUTPUT -- 75 ohm --+-- composite video out
@@ -931,6 +1115,19 @@ are GPIO14/15, GPIO16/17, and GPIO18/19 (`HDMI_BASE_PIN=12`, for M2P2).
 RP2350 HDMI builds embed the flash setup with clock divider 4 and read delay 4
 before raising the system clock to 378 MHz.
 
+### HSTX HDMI
+
+The HSTX backend uses the same pin pairs: clock minus and plus on GPIO12/13,
+and the three data pairs on GPIO14/15, GPIO16/17, and GPIO18/19. These pins
+are fixed, and `HDMI_BASE_PIN` does not move them.
+
+Its picture is 640 x 480 at 60 Hz. The signal is DVI-compatible TMDS, so a
+monitor treats it as DVI through the HDMI connector. There is no audio, no
+data islands, and no EDID or DDC.
+
+An HSTX build gives PLL_USB to the encoder and stops the USB clock, so the
+running program has no USB. BOOTSEL still works for loading the UF2.
+
 ### TFT
 
 The default pins are GPIO6 for CS, GPIO8 for reset, GPIO9 for the backlight,
@@ -948,9 +1145,18 @@ The current `main()` order is:
 6. draw and present frames on core 1 forever;
 7. run a slow status LED pattern on core 0 while IRQs do scanout work.
 
+An HSTX build must keep that order. `graphics_init()` sets the system and HSTX
+clocks, and it panics if it is called twice or from another core.
+
 ## Credits
 
 The NTSC signal work is based on KenKenMkIISR's
 [`rp2040_pwm_ntsc_textgraph2`](https://github.com/KenKenMkIISR/rp2040_pwm_ntsc_textgraph2)
 and on the PWM/DMA signal-generation idea by
 [`lovyan03`](https://github.com/lovyan03/).
+
+The HSTX serializer and the BGR555 line pipeline are adapted from
+[`DnCraptor/frank-quake2`, `psx_video.c`](https://github.com/DnCraptor/frank-quake2/blob/5d865a098f7e927e826c2ae9879e422854495669/drivers/hdmi/psx_video.c),
+which credits [`fliperama86`'s `pico_hdmi`](https://github.com/fliperama86/pico_hdmi).
+That code is public domain, and `drivers/hdmi-hstx/LICENSE.pico_hdmi` keeps its
+Unlicense text.

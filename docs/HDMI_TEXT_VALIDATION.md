@@ -13,6 +13,12 @@ API, application VRAM/font and text/3D cycle are preserved. `CMakeLists.txt`,
 `hdmi-text-demo.c`, `ntsc-tv.c`, `demo-graphics.h` and
 `drivers/hdmi/hdmi.h` are byte-identical to the baseline. NTSC is unchanged.
 
+That comparison is against the baseline commit named above. The later HSTX
+work changed `CMakeLists.txt` and `ntsc-tv.c` again, to add the `HDMI_HSTX`
+option, its presets, and the shared text setup that backend needs.
+`hdmi-text-demo.c`, `demo-graphics.h`, and `drivers/hdmi/hdmi.h` are still
+byte-identical to the baseline.
+
 The previous driver produced working output on the user's board.
 **The new command-based PIO transport has not yet been tested on a physical
 board.** Timing below is an instruction model, not a hardware measurement.

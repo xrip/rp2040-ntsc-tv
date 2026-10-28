@@ -4,10 +4,11 @@
 ## Project Overview
 
 This project, `ntsc-tv`, is a C application for the Raspberry Pi Pico that
-drives a display from one 320 x 240 8-bit indexed framebuffer. Four outputs are
-available: VGA, color composite NTSC, HDMI, and an ST7789 TFT. VGA and NTSC can
-run at the same time; HDMI and TFT are single-output forms. It builds for both
-RP2040 and RP2350.
+drives a display from one 320 x 240 8-bit indexed framebuffer. Five outputs are
+available: VGA, color composite NTSC, HDMI (PIO or HSTX), and an ST7789 TFT.
+VGA and NTSC can run at the same time; the PIO HDMI and TFT are single-output
+forms. On RP2350 the HSTX backend runs HDMI and NTSC together, with USB
+disabled. It builds for both RP2040 and RP2350.
 
 The demo in the root `ntsc-tv.c` has two parts and swaps between them: a
 graphics part with a jumping ball, a rotating torus, and a 3D helix over a wavy
@@ -23,7 +24,7 @@ the DOOM fire, drawn with CP437 shade characters. The display drivers live under
 *   **Core Pico SDK Libraries:**
     *   `hardware_dma`
     *   `hardware_pwm` (NTSC signal)
-    *   `hardware_pio` (VGA, HDMI, TFT signal)
+    *   `hardware_pio` (VGA, PIO HDMI, TFT signal)
     *   `pico_multicore`
 
 ## Building and Running
@@ -44,7 +45,11 @@ cmake --build cmake-build-rp2040 --target ntsc-tv
 ```
 
 `rp2040` and `rp2350` build dual VGA plus NTSC. `rp2040-hdmi`, `rp2350-hdmi`,
-`rp2040-tft`, and `rp2350-tft` build the single-output forms.
+`rp2040-tft`, and `rp2350-tft` build the single-output forms. `rp2350-hstx-ntsc`
+and `rp2350-hstx-ntsc-text` build HSTX HDMI together with NTSC, `rp2040-hdmi-text`
+and `rp2350-hdmi-text` build the HDMI text demo, `rp2040-tft-ntsc` and
+`rp2350-tft-ntsc` build TFT together with NTSC, and `rp2040-rgbs` and
+`rp2350-rgbs` build the 240p RGBs timing on the VGA pins.
 
 Build output, including the `.uf2` file, is written to
 `bin/rp2040/MinSizeRel/` or `bin/rp2350-arm-s/MinSizeRel/`.
@@ -52,21 +57,25 @@ Build output, including the `.uf2` file, is written to
 ### Running
 
 1.  Connect the board in BOOTSEL mode.
-2.  Copy `ntsc-tv.uf2`, `ntsc-tv-hdmi.uf2`, or `ntsc-tv-tft.uf2` to the mass
-    storage device.
+2.  Copy the `.uf2` file to the mass storage device: `ntsc-tv.uf2`,
+    `ntsc-tv-hdmi.uf2`, `ntsc-tv-hdmi-text.uf2`, `ntsc-tv-hstx-composite.uf2`,
+    `ntsc-tv-hstx-composite-text.uf2`, `ntsc-tv-tft.uf2`,
+    `ntsc-tv-tft-composite.uf2`, or `ntsc-tv-rgbs.uf2`.
 3.  Default pins: composite on GPIO28 (`NTSC_PIN_OUTPUT`), VGA on GPIO6..13
-    (`VGA_BASE_PIN`).
+    (`VGA_BASE_PIN`). The HSTX presets put composite on GPIO22 and use
+    GPIO12..19 for HDMI.
 
 ## Development Conventions
 
 *   C, following Raspberry Pi Pico SDK conventions.
 *   Signal generation (`drivers/vga`, `drivers/ntsc-composite`,
-    `drivers/hdmi`, `drivers/st7789`) is kept separate from application logic
-    (`ntsc-tv.c`). Mode handling shared by the outputs lives in
-    `drivers/graphics/graphics_modes.c`.
+    `drivers/hdmi`, `drivers/hdmi-hstx`, `drivers/st7789`) is kept separate from
+    application logic (`ntsc-tv.c`). Mode handling shared by the outputs lives
+    in `drivers/graphics/graphics_modes.c`.
 *   Applications use only `graphics.h`.
-*   The build is optimized for size and speed: `O3`, LTO, whole-program,
-    function and data sections.
+*   The build is optimized for size and speed: `O3`, LTO, function and data
+    sections. It does not use `-fwhole-program`, because LTO already does that
+    analysis across files.
 *   Both cores are used. Core 0 runs init and owns the scanout DMA interrupts;
     core 1 renders frames.
 *   Anything a scanout interrupt touches every line must be in RAM, not flash:

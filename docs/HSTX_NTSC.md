@@ -1,25 +1,18 @@
 # RP2350: HSTX HDMI and color NTSC together, without USB
 
-This change is based on `vga-tv-hybrid` commit
-`0a01d6283b7c24cfafc71908ac506076d2763e4f`. It adds `HDMI_HSTX=ON` as a separate
-backend. `HDMI=ON` still selects the existing PIO implementation.
+This is the `HDMI_HSTX=ON` backend. It was added on the `vga-tv-hybrid` branch
+and is now merged into `master`. It is a separate output path: `HDMI=ON` still
+selects the existing PIO implementation.
 
 The new configuration drives both connectors continuously from the same
 application framebuffer or text VRAM. It targets RP2350 Arm with a 12 MHz
 crystal and the GPIO12..19 HDMI layout used by M2P2. RP2040 does not have HSTX.
 The existing VGA/NTSC/PIO-HDMI configurations remain available.
 
-## Build and apply
-
-From a checkout of the base revision:
-
-```sh
-git apply --check rp2350-hstx-ntsc-no-usb.patch
-git apply rp2350-hstx-ntsc-no-usb.patch
-```
+## Build
 
 Set `PICO_SDK_PATH` to your Pico SDK directory. Tested with Pico SDK **2.3.1**
-and Arm GNU Toolchain **13.3.Rel1** (GCC 13.3.1), with CMake and Ninja.
+and Arm GNU Toolchain **15.2.Rel1** (GCC 15.2.1), with CMake and Ninja.
 
 ```sh
 cmake --preset rp2350-hstx-ntsc
@@ -48,7 +41,8 @@ The equivalent output switches are:
 ```sh
 cmake -S . -B build-hstx-ntsc -G Ninja \
   -DPICO_PLATFORM=rp2350-arm-s -DPICO_BOARD=pico2 \
-  -DHDMI_HSTX=ON -DNTSC_TV=ON -DVGA=OFF -DHDMI=OFF -DTFT=OFF
+  -DHDMI_HSTX=ON -DNTSC_TV=ON -DVGA=OFF -DHDMI=OFF -DTFT=OFF \
+  -DNTSC_PIN_OUTPUT=22
 cmake --build build-hstx-ntsc --target ntsc-tv
 ```
 
@@ -133,8 +127,10 @@ connector; audio, data islands, EDID/DDC, and USB are not implemented here.
   not allocate or copy a font or text VRAM.
 - The HSTX adapter uses four 640-pixel BGR555 scanline slots (5120 bytes), a
   512-byte graphics palette, a 32-byte text palette, and a 320-byte staging
-  line. It does not allocate a full RGB framebuffer. Low-level command lists
-  and small state are additional, as is RAM-resident code.
+  line. It does not allocate a full RGB framebuffer. The ordinary preset also
+  keeps the shared 320 x 240 indexed framebuffer of 76,800 bytes; the text
+  preset turns that off with `GRAPHICS_BUILTIN_FRAMEBUFFER=OFF`. Low-level
+  command lists and small state are additional, as is RAM-resident code.
 - Keep VRAM, fonts, palette indices, and framebuffers in SRAM. The IRQ code
   and its internal command/color tables are explicitly placed in SRAM. This
   is not a PSRAM scanout implementation.
@@ -196,32 +192,31 @@ The new tests use ASan/UBSan and cover BGR555 channel order/quantization, all
 bit order and stride, wrapping, blink/cursor, borders, and guarded output
 buffers. They do not model DMA timing or the analog signal.
 
-The patch was cross-compiled to ELF/UF2 with the toolchain above, including the
-ordinary and text HSTX+NTSC demos. Review the ELF/map when changing optimization
-flags or compiler versions: even a non-const static lookup table can be moved
-to XIP by LTO, and memset-like loops can turn into flash-resident library calls.
-The HSTX build explicitly prevents those loop transformations in both output
-renderers and places their hot lookup tables in RAM.
+Both HSTX+NTSC configurations were cross-compiled to ELF/UF2 with the toolchain
+above, the ordinary demo and the shared-text demo. Review the ELF/map when
+changing optimization flags or compiler versions: even a non-const static lookup
+table can be moved to XIP by LTO, and memset-like loops can turn into
+flash-resident library calls. The HSTX build explicitly prevents those loop
+transformations in both output renderers and places their hot lookup tables in
+RAM.
 
 Recorded build results (RAM and scratch regions listed separately):
 
 | RP2350 configuration | ELF/UF2 | FLASH | RAM | SCRATCH_X / SCRATCH_Y |
 |---|---|---:|---:|---:|
-| HSTX + NTSC, ordinary demo | Pass | 28,288 B | 224,556 B | 2048 / 2048 B |
-| HSTX + NTSC, shared-text demo | Pass | 29,668 B | 222,604 B | 0 / 2048 B |
+| HSTX + NTSC, ordinary demo | Pass | 28,196 B | 224,564 B | 2048 / 2048 B |
+| HSTX + NTSC, shared-text demo | Pass | 29,444 B | 222,204 B | 0 / 2048 B |
 
 The HSTX host run passed 24,178,042 checks over 32,952 rendered text rows;
 the existing descriptor suite under HSTX+NTSC passed another 52,341 checks.
 An ELF/disassembly audit confirmed that both working IRQ paths, HSTX recovery,
 shared IRQ dispatch, command/color tables, and the demo font reside in SRAM.
 
-The old RP2040 VGA+NTSC and PIO-HDMI configurations were also cross-compiled.
-This particular SDK/toolchain combination needed the local diagnostic linker
-flag `-Wl,-u,__wrap_remquof` to retain a float wrapper under LTO. The identical
-link failure without that flag was reproduced on the untouched base commit;
-the workaround is not added to this patch's presets or sources. Both legacy
-configurations produced ELF/UF2 with the flag. It is not needed for the new
-RP2350 HSTX builds.
+The old RP2040 VGA+NTSC and PIO-HDMI configurations were also cross-compiled,
+and they link with no extra flags on this toolchain. An earlier SDK and
+toolchain pairing needed the local diagnostic linker flag
+`-Wl,-u,__wrap_remquof` to retain a float wrapper under LTO; that workaround is
+not part of the presets or the sources.
 
 Physical validation remains required. On the board, check both connectors at
 once, NTSC color in the graphics demo, text/graphics transitions, sustained

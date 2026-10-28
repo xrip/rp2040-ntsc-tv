@@ -2,8 +2,13 @@
 
 This performance revision targets the HDMI-only build of `vga-tv-hybrid`, at
 commit `231f1fa7e50368ee07fb72330377a15c0208ede5`. It preserves the current
-RP2350 flash setup, GPIO12..19 assignment, and text/3D demo cycle. It does not modify the NTSC driver or
-enable simultaneous HDMI/NTSC output.
+RP2350 flash setup, GPIO12..19 assignment, and text/3D demo cycle. It does not
+modify the NTSC driver or enable simultaneous HDMI/NTSC output.
+
+This is the PIO HDMI path. The tree also has a second HDMI backend,
+`drivers/hdmi-hstx/`, which does run HDMI and NTSC together on RP2350; see
+[HSTX_NTSC.md](HSTX_NTSC.md). The two paths are separate, and this document
+describes the PIO one.
 
 ## Output modes
 
